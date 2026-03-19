@@ -1,0 +1,62 @@
+services:
+
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    container_name: broker
+    volumes:
+      - ./broker.py:/app/main.py
+    ports:
+      - "5555:5555"
+      - "5556:5556"
+
+  servidor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    volumes:
+      - ./servidor.py:/app/main.py
+      - servidor_data:/app
+    depends_on:
+      - broker
+
+  cliente:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    volumes:
+      - ./cliente.py:/app/main.py
+    depends_on:
+      - broker
+      - servidor
+
+  servidor-java:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    image: cc7261:java
+    environment:
+      - APP_MODE=servidor
+    volumes:
+      - servidor_java_data:/app
+    depends_on:
+      - broker
+
+  cliente-java:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    image: cc7261:java
+    environment:
+      - APP_MODE=cliente
+    depends_on:
+      - broker
+      - servidor-java
+
+volumes:
+  servidor_data:
+  servidor_java_data:

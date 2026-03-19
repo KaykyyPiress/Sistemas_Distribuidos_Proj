@@ -42,7 +42,7 @@ services:
     environment:
       - APP_MODE=servidor
     volumes:
-      - servidor_java_data:/app
+      - servidor_java_data:/data
     depends_on:
       - broker
 

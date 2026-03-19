@@ -3,7 +3,7 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <groupId>br.fei.cc7261</groupId>
+    <groupId>Main</groupId>
     <artifactId>bbs-java</artifactId>
     <version>1.0</version>
     <packaging>jar</packaging>
@@ -22,7 +22,7 @@
             <artifactId>maven-jar-plugin</artifactId>
             <version>3.3.0</version>
             <configuration>
-                <archive><manifest><mainClass>br.fei.cc7261.Main</mainClass></manifest></archive>
+                <archive><manifest><mainClass>Main</mainClass></manifest></archive>
                 <finalName>app</finalName>
             </configuration>
         </plugin>

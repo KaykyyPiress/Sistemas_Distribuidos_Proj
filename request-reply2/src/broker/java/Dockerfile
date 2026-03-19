@@ -10,4 +10,4 @@ WORKDIR /app
 COPY --from=build /app/target/app.jar .
 COPY --from=build /app/target/dependency ./dependency
 ENV APP_MODE=cliente
-CMD ["java", "-cp", "app.jar:dependency/*", "br.fei.cc7261.Main"]
+CMD ["java", "-cp", "app.jar:dependency/*", "Main"]

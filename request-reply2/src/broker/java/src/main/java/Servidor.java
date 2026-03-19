@@ -1,4 +1,3 @@
-package br.fei.cc7261;
 
 import org.zeromq.SocketType;
 import org.zeromq.ZContext;
@@ -16,7 +15,7 @@ import java.util.regex.Pattern;
 
 public class Servidor {
 
-    private static final Path STATE_FILE = Path.of("state_java.msgpack");
+    private static final Path STATE_FILE = Path.of("/data/state_java.msgpack");
     private static final Pattern USER_REGEX = Pattern.compile("^[a-zA-Z0-9_]{3,20}$");
     private static final Pattern CHAN_REGEX = Pattern.compile("^[a-zA-Z0-9_-]{3,50}$");
 

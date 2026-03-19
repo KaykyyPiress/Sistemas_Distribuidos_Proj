@@ -7,6 +7,7 @@ USERNAME = "bot_01"
 CANAL_PADRAO = "geral"
 
 
+
 def send_request(socket, message):
     socket.send(msgpack.packb(message, use_bin_type=True))
     raw_reply = socket.recv()
@@ -21,7 +22,8 @@ def fazer_login(socket, username):
             "timestamp": time.time(),
             "payload": {
                 "username": username
-            }
+            },
+            "timestamp":time.time()
         }
         reply = send_request(socket, login_request)
         print(f"[LOGIN] Resposta do servidor: {reply}")
@@ -40,7 +42,8 @@ def listar_canais(socket):
     list_request = {
         "type": "list_channels",
         "timestamp": time.time(),
-        "payload": {}
+        "payload": {},
+        "timestamp":time.time()
     }
     reply = send_request(socket, list_request)
     print(f"[LISTAR CANAIS] Resposta do servidor: {reply}")
@@ -63,7 +66,8 @@ def criar_canal(socket, username, nome_canal):
         "payload": {
             "username": username,
             "channel": nome_canal
-        }
+        },
+        "timestamp":time.time()
     }
     reply = send_request(socket, create_request)
     print(f"[CRIAR CANAL] Resposta do servidor: {reply}")

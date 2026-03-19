@@ -1,4 +1,3 @@
-package br.fei.cc7261;
 
 import org.msgpack.core.MessageBufferPacker;
 import org.msgpack.core.MessagePack;

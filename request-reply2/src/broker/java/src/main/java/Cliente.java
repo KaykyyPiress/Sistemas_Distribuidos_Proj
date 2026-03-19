@@ -1,4 +1,3 @@
-package br.fei.cc7261;
 
 import org.zeromq.SocketType;
 import org.zeromq.ZContext;

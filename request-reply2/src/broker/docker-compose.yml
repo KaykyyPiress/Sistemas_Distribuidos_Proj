@@ -12,6 +12,18 @@ services:
       - "5555:5555"
       - "5556:5556"
 
+  pubsub-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    container_name: pubsub-proxy
+    volumes:
+      - ./pubsub_proxy.py:/app/main.py
+    ports:
+      - "5557:5557"
+      - "5558:5558"
+
   servidor:
     build:
       context: .
@@ -22,6 +34,7 @@ services:
       - servidor_data:/app
     depends_on:
       - broker
+      - pubsub-proxy
 
   cliente:
     build:
@@ -32,6 +45,7 @@ services:
       - ./cliente.py:/app/main.py
     depends_on:
       - broker
+      - pubsub-proxy
       - servidor
 
   servidor-java:
@@ -45,6 +59,7 @@ services:
       - servidor_java_data:/data
     depends_on:
       - broker
+      - pubsub-proxy
 
   cliente-java:
     build:
@@ -55,6 +70,7 @@ services:
       - APP_MODE=cliente
     depends_on:
       - broker
+      - pubsub-proxy
       - servidor-java
 
 volumes:

@@ -1,130 +1,131 @@
-# Projeto de Sistemas Distribuídos – Parte 1
+# Projeto de Sistemas Distribuídos – Parte 2
 
 ## Introdução
 
-Este projeto implementa um sistema distribuído baseado no padrão cliente-servidor com a utilização de um broker intermediário. O objetivo desta primeira parte é permitir que clientes realizem login, criem canais de comunicação e listem os canais existentes.
+Este projeto implementa um sistema distribuído com dois padrões de comunicação:
 
-A arquitetura do sistema é composta por três principais componentes:
+- **Request-Reply** para operações de controle (login, criação de canal, listagem e requisição de publicação)
+- **Publisher-Subscriber** para distribuição das mensagens publicadas nos canais
 
-- **Cliente**: responsável por enviar requisições ao sistema  
-- **Broker**: intermediário responsável por encaminhar mensagens entre clientes e servidores  
-- **Servidor**: responsável por processar as requisições e manter o estado da aplicação  
+A arquitetura contém cinco componentes:
 
-A comunicação segue o padrão *request-reply* utilizando sockets.
+- **Cliente**: realiza requisições ao servidor via broker e se inscreve em canais no proxy Pub/Sub
+- **Broker Req/Rep**: encaminha requisições entre clientes e servidores
+- **Servidor**: processa requisições, persiste estado e publica mensagens
+- **Proxy Pub/Sub**: intermedia publicadores e assinantes
+- **Clientes/Servidores Java**: mantidos para interoperabilidade da parte 1
 
 ---
 
 ## Portas utilizadas
 
-- **Broker (frontend - clientes)**: `tcp://localhost:5555`  
-- **Broker (backend - servidores)**: `tcp://localhost:5556`  
+- **Broker (frontend - clientes)**: `tcp://localhost:5555`
+- **Broker (backend - servidores)**: `tcp://localhost:5556`
+- **Pub/Sub Proxy (XSUB - publicadores)**: `tcp://localhost:5557`
+- **Pub/Sub Proxy (XPUB - assinantes)**: `tcp://localhost:5558`
 
 ---
 
-## Funcionamento geral
+## Fluxo de mensagens
 
-O fluxo de comunicação do sistema ocorre da seguinte forma:
+### Operações de controle (Req/Rep)
 
-1. O cliente envia uma requisição para o broker  
-2. O broker encaminha a requisição para um dos servidores disponíveis  
-3. O servidor processa a requisição  
-4. A resposta retorna ao cliente através do broker  
+Cliente → Broker → Servidor
 
-### Fluxo simplificado
+- `login`
+- `create_channel`
+- `list_channels`
+- `publish_message` (requisição para publicar em um canal)
 
-Cliente → Broker → Servidor  
-Cliente ← Broker ← Servidor
+Servidor → Broker → Cliente
 
----
+- resposta `ok`/`error` para cada operação
 
-## Tecnologias utilizadas
+### Publicação de mensagens (Pub/Sub)
 
-### Linguagens
+1. Cliente envia `publish_message` ao servidor (Req/Rep)
+2. Servidor publica no tópico/canal correspondente (Pub/Sub)
+3. Clientes inscritos recebem a mensagem no canal
 
-Foram utilizadas as linguagens **Python** e **Java**. A escolha foi feita com base na familiaridade prévia do grupo com essas tecnologias, permitindo maior agilidade no desenvolvimento e integração dos componentes.
+Toda mensagem possui timestamp de envio; no cliente assinante também é exibido o timestamp de recebimento.
 
 ---
 
 ## Serialização
 
-A comunicação entre os componentes é realizada utilizando **MessagePack**, um formato de serialização binário.
+A serialização é feita com **MessagePack** em Python e Java.
 
-### Motivos da escolha:
+Formato geral das mensagens Req/Rep:
 
-- Atende ao requisito do projeto de não utilizar JSON ou texto simples  
-- Possui melhor desempenho que JSON  
-- Gera mensagens menores (mais eficiente para rede)  
-- Suporte tanto em Python quanto em Java  
+- `type`
+- `timestamp`
+- `payload`
 
-Todas as mensagens trocadas no sistema possuem:
+Formato da publicação no Pub/Sub:
 
-- Tipo da requisição  
-- Payload (dados)  
-- Timestamp de envio  
+- `channel`
+- `message`
+- `username`
+- `sent_timestamp`
+- `published_timestamp`
 
 ---
 
 ## Persistência
 
-Cada servidor mantém seu próprio estado local, armazenado em disco utilizando arquivos no formato MessagePack.
+O servidor Python mantém estado local em `state.msgpack` com:
 
-### Dados persistidos:
+- `logins`
+- `channels`
+- `publications`
 
-- Usuários que realizaram login (com timestamp)  
-- Lista de canais criados  
+Cada publicação gravada contém usuário, canal, conteúdo e timestamps.
 
-Cada servidor possui seu próprio arquivo de estado, não sendo compartilhado com outros servidores, conforme especificação do projeto.
-
----
-
-## Importante sobre consistência
-
-Como cada servidor mantém seu próprio estado independente e o broker distribui as requisições entre múltiplos servidores, pode ocorrer inconsistência na visão do cliente.
-
-### Exemplo:
-
-- Um canal pode ser criado em um servidor  
-- Outro servidor pode não conhecer esse canal  
-- Requisições consecutivas podem retornar resultados diferentes  
-
-Essa característica é esperada em sistemas distribuídos sem replicação de estado e não foi tratada nesta etapa do projeto.
+A escrita em disco usa arquivo temporário + `fsync` + `replace` para reduzir risco de corrupção.
 
 ---
 
-## Funcionalidades implementadas
+## Funcionamento dos bots (Python e Java)
 
-- Login de usuários  
-- Criação de canais  
-- Listagem de canais  
-- Comunicação distribuída com broker  
-- Persistência de dados em disco  
-- Serialização binária com MessagePack  
-- Uso de timestamp em todas as mensagens  
+Ao iniciar, os bots (Python e Java):
+
+1. Faz login
+2. Lista canais
+3. Se houver menos de 5 canais, cria um novo
+4. Se estiver inscrito em menos de 3 canais, se inscreve em mais um canal
+5. Entra em loop infinito:
+   - escolhe um canal aleatório
+   - envia 10 mensagens aleatórias
+   - aguarda 1 segundo entre mensagens
+
+Em paralelo, os bots mantêm um assinante ativo exibindo para cada mensagem recebida:
+
+- canal
+- mensagem
+- timestamp de envio
+- timestamp de recebimento
 
 ---
 
 ## Execução
 
-O projeto pode ser executado com Docker através do comando:
+Na pasta `request-reply2/src/broker`:
 
-docker compose up
+```bash
+docker compose up --build
+```
 
 Esse comando inicializa:
 
-- Broker  
-- Servidores (Python e Java)  
-- Clientes (Python e Java)  
-
-Permitindo simular um ambiente distribuído completo.
+- `broker`
+- `pubsub-proxy`
+- `servidor` (Python)
+- `cliente` (Python)
+- `servidor-java`
+- `cliente-java`
 
 ---
 
-## Considerações finais
+## Observação sobre consistência
 
-Esta primeira etapa estabelece a base do sistema distribuído, definindo:
-
-- Estrutura de comunicação  
-- Formato das mensagens  
-- Persistência de dados  
-
-As próximas etapas do projeto irão expandir o sistema, adicionando funcionalidades como envio e armazenamento de mensagens entre usuários nos canais.
+Como cada servidor mantém estado local independente, múltiplos servidores sem replicação podem apresentar visões diferentes de canais/publicações.

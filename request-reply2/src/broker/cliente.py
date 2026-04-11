@@ -1,11 +1,16 @@
-import zmq
-import msgpack
+import random
+import string
+import threading
 import time
 
-BROKER_URL = "tcp://broker:5555"
-USERNAME = "bot_01"
-CANAL_PADRAO = "geral"
+import msgpack
+import zmq
 
+BROKER_URL = "tcp://broker:5555"
+SUB_URL = "tcp://pubsub-proxy:5558"
+USERNAME = "bot_01"
+MIN_CHANNELS = 5
+MIN_SUBSCRIPTIONS = 3
 
 
 def send_request(socket, message):
@@ -14,95 +19,170 @@ def send_request(socket, message):
     return msgpack.unpackb(raw_reply, raw=False)
 
 
+def build_request(message_type, payload):
+    return {
+        "type": message_type,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+
+
 def fazer_login(socket, username):
-    """Tenta fazer login. Repete em caso de erro."""
     while True:
-        login_request = {
-            "type": "login",
-            "timestamp": time.time(),
-            "payload": {
-                "username": username
-            },
-            "timestamp":time.time()
-        }
-        reply = send_request(socket, login_request)
+        reply = send_request(socket, build_request("login", {"username": username}))
         print(f"[LOGIN] Resposta do servidor: {reply}")
 
         if reply.get("status") == "ok":
             print(f"[LOGIN] Login bem-sucedido como {username!r}.")
             return True
-        else:
-            erro = reply.get("payload", {}).get("message", "erro desconhecido")
-            print(f"[LOGIN] Falha no login: {erro}. Tentando novamente em 3s...")
-            time.sleep(3)
+
+        erro = reply.get("payload", {}).get("message", "erro desconhecido")
+        print(f"[LOGIN] Falha no login: {erro}. Tentando novamente em 3s...")
+        time.sleep(3)
 
 
 def listar_canais(socket):
-    """Solicita a lista de canais disponiveis ao servidor."""
-    list_request = {
-        "type": "list_channels",
-        "timestamp": time.time(),
-        "payload": {},
-        "timestamp":time.time()
-    }
-    reply = send_request(socket, list_request)
+    reply = send_request(socket, build_request("list_channels", {}))
     print(f"[LISTAR CANAIS] Resposta do servidor: {reply}")
 
     if reply.get("status") == "ok":
         canais = reply.get("payload", {}).get("channels", [])
-        print(f"[LISTAR CANAIS] Canais disponiveis: {canais}")
+        print(f"[LISTAR CANAIS] Canais disponíveis: {canais}")
         return canais
-    else:
-        erro = reply.get("payload", {}).get("message", "erro desconhecido")
-        print(f"[LISTAR CANAIS] Erro ao listar canais: {erro}")
-        return []
+
+    erro = reply.get("payload", {}).get("message", "erro desconhecido")
+    print(f"[LISTAR CANAIS] Erro ao listar canais: {erro}")
+    return []
 
 
 def criar_canal(socket, username, nome_canal):
-    """Solicita a criacao de um canal ao servidor."""
-    create_request = {
-        "type": "create_channel",
-        "timestamp": time.time(),
-        "payload": {
-            "username": username,
-            "channel": nome_canal
-        },
-        "timestamp":time.time()
-    }
-    reply = send_request(socket, create_request)
+    payload = {"username": username, "channel": nome_canal}
+    reply = send_request(socket, build_request("create_channel", payload))
     print(f"[CRIAR CANAL] Resposta do servidor: {reply}")
 
     if reply.get("status") == "ok":
         print(f"[CRIAR CANAL] Canal {nome_canal!r} criado com sucesso.")
-    else:
+        return True
+
+    erro = reply.get("payload", {}).get("message", "erro desconhecido")
+    print(f"[CRIAR CANAL] Não foi possível criar o canal {nome_canal!r}: {erro}")
+    return False
+
+
+def publicar(socket, username, canal, mensagem):
+    payload = {
+        "username": username,
+        "channel": canal,
+        "message": mensagem,
+    }
+    reply = send_request(socket, build_request("publish_message", payload))
+    status = reply.get("status")
+    if status != "ok":
         erro = reply.get("payload", {}).get("message", "erro desconhecido")
-        print(f"[CRIAR CANAL] Nao foi possivel criar o canal {nome_canal!r}: {erro}")
+        print(f"[PUB-REQ] Falha ao publicar em {canal!r}: {erro}")
+    else:
+        print(f"[PUB-REQ] Publicação confirmada em {canal!r}.")
+
+
+def generate_channel_name(username):
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+    return f"{username}_{suffix}"
+
+
+def generate_message():
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    return f"msg_{suffix}"
+
+
+def listen_subscriptions(sub_socket, stop_event):
+    poller = zmq.Poller()
+    poller.register(sub_socket, zmq.POLLIN)
+
+    while not stop_event.is_set():
+        events = dict(poller.poll(timeout=200))
+        if sub_socket not in events:
+            continue
+
+        topic, raw_payload = sub_socket.recv_multipart()
+        received_timestamp = time.time()
+        payload = msgpack.unpackb(raw_payload, raw=False)
+
+        channel = payload.get("channel", topic.decode("utf-8", errors="replace"))
+        message = payload.get("message", "")
+        sent_timestamp = payload.get("sent_timestamp", "?")
+
+        print(
+            "[SUB] "
+            f"canal={channel} | mensagem={message} | "
+            f"ts_envio={sent_timestamp} | ts_recebimento={received_timestamp}",
+            flush=True,
+        )
 
 
 def main():
     context = zmq.Context()
-    socket = context.socket(zmq.REQ)
-    socket.connect(BROKER_URL)
+
+    req_socket = context.socket(zmq.REQ)
+    req_socket.connect(BROKER_URL)
     print(f"[CLIENTE] Conectado ao broker em {BROKER_URL}")
 
-    # 1. Login (com retry automatico em caso de erro)
-    fazer_login(socket, USERNAME)
+    sub_socket = context.socket(zmq.SUB)
+    sub_socket.connect(SUB_URL)
+    print(f"[CLIENTE] Conectado ao proxy Pub/Sub em {SUB_URL}")
 
-    # 2. Listar canais disponiveis
-    canais = listar_canais(socket)
+    stop_event = threading.Event()
+    listener = threading.Thread(target=listen_subscriptions, args=(sub_socket, stop_event), daemon=True)
+    listener.start()
 
-    # 3. Criar canal "geral" caso ele nao exista
-    if CANAL_PADRAO not in canais:
-        criar_canal(socket, USERNAME, CANAL_PADRAO)
-    else:
-        print(f"[CLIENTE] Canal {CANAL_PADRAO!r} ja existe, pulando criacao.")
+    subscribed_channels = set()
 
-    # 4. Listar canais novamente para confirmar
-    listar_canais(socket)
+    try:
+        fazer_login(req_socket, USERNAME)
 
-    socket.close()
-    context.term()
-    print("[CLIENTE] Encerrando.")
+        canais = listar_canais(req_socket)
+        if len(canais) < MIN_CHANNELS:
+            novo_canal = generate_channel_name(USERNAME)
+            if criar_canal(req_socket, USERNAME, novo_canal):
+                canais = listar_canais(req_socket)
+
+        if canais and len(subscribed_channels) < MIN_SUBSCRIPTIONS:
+            candidatos = [c for c in canais if c not in subscribed_channels]
+            if candidatos:
+                canal = random.choice(candidatos)
+                sub_socket.setsockopt_string(zmq.SUBSCRIBE, canal)
+                subscribed_channels.add(canal)
+                print(f"[SUB] Inscrito no canal {canal!r}")
+
+        while True:
+            canais = listar_canais(req_socket)
+            if not canais:
+                print("[CLIENTE] Nenhum canal disponível. Tentando novamente em 2s...")
+                time.sleep(2)
+                continue
+
+            if len(subscribed_channels) < MIN_SUBSCRIPTIONS:
+                candidatos = [c for c in canais if c not in subscribed_channels]
+                if candidatos:
+                    canal = random.choice(candidatos)
+                    sub_socket.setsockopt_string(zmq.SUBSCRIBE, canal)
+                    subscribed_channels.add(canal)
+                    print(f"[SUB] Inscrito no canal {canal!r}")
+
+            for _ in range(10):
+                canal = random.choice(canais)
+                mensagem = generate_message()
+                publicar(req_socket, USERNAME, canal, mensagem)
+                time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("[CLIENTE] Encerrando por interrupção do usuário.")
+    finally:
+        stop_event.set()
+        listener.join(timeout=1)
+        req_socket.close(0)
+        sub_socket.close(0)
+        context.term()
+        print("[CLIENTE] Encerrado.")
 
 
 if __name__ == "__main__":

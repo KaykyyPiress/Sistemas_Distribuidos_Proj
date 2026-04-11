@@ -1,8 +1,8 @@
-
 import org.zeromq.SocketType;
 import org.zeromq.ZContext;
 import org.zeromq.ZMQ;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -23,15 +23,20 @@ public class Servidor {
         Map<String, Object> state = loadState();
         System.out.println("[SERVIDOR-JAVA] Estado carregado: "
             + getList(state, "logins").size() + " login(s), "
-            + getList(state, "channels").size() + " canal(is).");
+            + getList(state, "channels").size() + " canal(is), "
+            + getList(state, "publications").size() + " publicacao(oes).");
 
         try (ZContext ctx = new ZContext()) {
-            ZMQ.Socket socket = ctx.createSocket(SocketType.REP);
-            socket.connect("tcp://broker:5556");
-            System.out.println("[SERVIDOR-JAVA] Conectado ao broker na porta 5556. Aguardando...");
+            ZMQ.Socket repSocket = ctx.createSocket(SocketType.REP);
+            repSocket.connect("tcp://broker:5556");
+
+            ZMQ.Socket pubSocket = ctx.createSocket(SocketType.PUB);
+            pubSocket.connect("tcp://pubsub-proxy:5557");
+
+            System.out.println("[SERVIDOR-JAVA] Conectado ao broker (5556) e ao proxy Pub/Sub (5557). Aguardando...");
 
             while (!Thread.currentThread().isInterrupted()) {
-                byte[] raw = socket.recv();
+                byte[] raw = repSocket.recv();
                 Map<String, Object> msg = MsgHelper.unpack(raw);
                 String type = (String) msg.getOrDefault("type", "");
                 System.out.println("[SERVIDOR-JAVA] Mensagem recebida: type=" + type);
@@ -47,11 +52,14 @@ public class Servidor {
                     case "list_channels":
                         response = handleListChannels(state);
                         break;
+                    case "publish_message":
+                        response = handlePublishMessage(msg, state, pubSocket);
+                        break;
                     default:
                         response = makeResponse("error", map("message", "Operacao desconhecida: " + type));
                         break;
                 }
-                socket.send(MsgHelper.pack(response));
+                repSocket.send(MsgHelper.pack(response));
             }
         }
     }
@@ -103,6 +111,40 @@ public class Servidor {
         return makeResponse("ok", pl);
     }
 
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> handlePublishMessage(Map<String, Object> msg, Map<String, Object> state, ZMQ.Socket pubSocket) throws Exception {
+        Map<String, Object> pl = (Map<String, Object>) msg.getOrDefault("payload", new HashMap<>());
+        String channel = pl.getOrDefault("channel", "").toString().trim();
+        String message = pl.getOrDefault("message", "").toString().trim();
+        String username = pl.getOrDefault("username", "desconhecido").toString();
+
+        if (channel.isEmpty())
+            return makeResponse("error", map("message", "Canal nao informado."));
+        if (!getList(state, "channels").contains(channel))
+            return makeResponse("error", map("message", "Canal " + channel + " nao existe."));
+        if (message.isEmpty())
+            return makeResponse("error", map("message", "Mensagem vazia."));
+
+        double sentTimestamp = msg.containsKey("timestamp") ? toDouble(msg.get("timestamp")) : now();
+        double publishedTimestamp = now();
+
+        Map<String, Object> publication = new LinkedHashMap<>();
+        publication.put("channel", channel);
+        publication.put("message", message);
+        publication.put("username", username);
+        publication.put("sent_timestamp", sentTimestamp);
+        publication.put("published_timestamp", publishedTimestamp);
+
+        pubSocket.sendMore(channel.getBytes(StandardCharsets.UTF_8));
+        pubSocket.send(MsgHelper.pack(publication));
+
+        getList(state, "publications").add(publication);
+        saveState(state);
+
+        System.out.println("[PUB-JAVA] " + username + " publicou em " + channel + ": " + message);
+        return makeResponse("ok", map("message", "Publicacao enviada com sucesso."));
+    }
+
     private static Map<String, Object> makeResponse(String status, Map<String, Object> payload) {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("status", status);
@@ -134,11 +176,17 @@ public class Servidor {
         return (List<Object>) state.computeIfAbsent(key, k -> new ArrayList<>());
     }
 
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> loadState() {
+    private static Map<String, Object> emptyState() {
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("logins", new ArrayList<>());
         state.put("channels", new ArrayList<>());
+        state.put("publications", new ArrayList<>());
+        return state;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loadState() {
+        Map<String, Object> state = emptyState();
 
         try {
             if (!Files.exists(STATE_FILE) || Files.size(STATE_FILE) == 0) {
@@ -150,11 +198,14 @@ public class Servidor {
             if (persisted != null) {
                 Object logins = persisted.get("logins");
                 Object channels = persisted.get("channels");
+                Object publications = persisted.get("publications");
                 state.put("logins", logins instanceof List ? logins : new ArrayList<>());
                 state.put("channels", channels instanceof List ? channels : new ArrayList<>());
+                state.put("publications", publications instanceof List ? publications : new ArrayList<>());
             }
         } catch (Exception e) {
             System.out.println("[SERVIDOR-JAVA] Aviso: estado invalido ou corrompido. Reiniciando estado. Motivo: " + e.getMessage());
+            state = emptyState();
         }
 
         return state;

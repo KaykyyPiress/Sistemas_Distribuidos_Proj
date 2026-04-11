@@ -59,6 +59,7 @@ services:
       - servidor_java_data:/data
     depends_on:
       - broker
+      - pubsub-proxy
 
   cliente-java:
     build:
@@ -69,6 +70,7 @@ services:
       - APP_MODE=cliente
     depends_on:
       - broker
+      - pubsub-proxy
       - servidor-java
 
 volumes:

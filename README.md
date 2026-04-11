@@ -85,9 +85,9 @@ A escrita em disco usa arquivo temporário + `fsync` + `replace` para reduzir ri
 
 ---
 
-## Funcionamento do bot Python (parte 2)
+## Funcionamento dos bots (Python e Java)
 
-Ao iniciar, o bot:
+Ao iniciar, os bots (Python e Java):
 
 1. Faz login
 2. Lista canais
@@ -98,7 +98,7 @@ Ao iniciar, o bot:
    - envia 10 mensagens aleatórias
    - aguarda 1 segundo entre mensagens
 
-Em paralelo, o bot mantém um assinante ativo exibindo para cada mensagem recebida:
+Em paralelo, os bots mantêm um assinante ativo exibindo para cada mensagem recebida:
 
 - canal
 - mensagem

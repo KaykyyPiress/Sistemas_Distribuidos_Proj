@@ -79,18 +79,16 @@ public class Cliente {
     }
 
     private static void listenSubscriptions(ZMQ.Socket sub, boolean[] running) {
-        ZMQ.Poller poller = sub.getContext().createPoller(1);
-        poller.register(sub, ZMQ.Poller.POLLIN);
+        sub.setReceiveTimeOut(200);
 
         while (running[0] && !Thread.currentThread().isInterrupted()) {
-            int events = poller.poll(200);
-            if (events <= 0 || !poller.pollin(0)) {
+            byte[] topic = sub.recv(0);
+            if (topic == null) {
                 continue;
             }
 
-            byte[] topic = sub.recv(0);
             byte[] payloadRaw = sub.recv(0);
-            if (topic == null || payloadRaw == null) {
+            if (payloadRaw == null) {
                 continue;
             }
 
@@ -111,9 +109,6 @@ public class Cliente {
                 System.out.println("[SUB-JAVA] Erro ao processar mensagem recebida: " + e.getMessage());
             }
         }
-
-        poller.unregister(sub);
-        poller.close();
     }
 
     private static void subscribeIfNeeded(ZMQ.Socket sub, List<String> channels, Set<String> subscribed, Random random) {

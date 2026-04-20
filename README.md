@@ -1,109 +1,87 @@
-# Projeto de Sistemas Distribuídos – Parte 2
+# Projeto de Sistemas Distribuídos – Parte 3
 
-## Introdução
+## Objetivo
 
-Este projeto implementa um sistema distribuído com dois padrões de comunicação:
+Nesta etapa foram adicionados:
 
-- **Request-Reply** para operações de controle (login, criação de canal, listagem e requisição de publicação)
-- **Publisher-Subscriber** para distribuição das mensagens publicadas nos canais
-
-A arquitetura contém cinco componentes:
-
-- **Cliente**: realiza requisições ao servidor via broker e se inscreve em canais no proxy Pub/Sub
-- **Broker Req/Rep**: encaminha requisições entre clientes e servidores
-- **Servidor**: processa requisições, persiste estado e publica mensagens
-- **Proxy Pub/Sub**: intermedia publicadores e assinantes
-- **Clientes/Servidores Java**: mantidos para interoperabilidade da parte 1
+1. **Relógio lógico (Lamport)** em clientes/bots e servidores
+2. **Serviço de referência** para:
+   - atribuição de rank aos servidores
+   - manutenção da lista de servidores ativos
+   - atualização por heartbeat
+   - sincronização de relógio físico dos servidores
 
 ---
 
-## Portas utilizadas
+## Arquitetura
 
-- **Broker (frontend - clientes)**: `tcp://localhost:5555`
-- **Broker (backend - servidores)**: `tcp://localhost:5556`
-- **Pub/Sub Proxy (XSUB - publicadores)**: `tcp://localhost:5557`
-- **Pub/Sub Proxy (XPUB - assinantes)**: `tcp://localhost:5558`
+### Plano de controle (Req/Rep)
+- Cliente ↔ Broker (`5555/5556`) ↔ Servidor
+- Servidor ↔ Referência (`5559`)
 
----
-
-## Fluxo de mensagens
-
-### Operações de controle (Req/Rep)
-
-Cliente → Broker → Servidor
-
-- `login`
-- `create_channel`
-- `list_channels`
-- `publish_message` (requisição para publicar em um canal)
-
-Servidor → Broker → Cliente
-
-- resposta `ok`/`error` para cada operação
-
-### Publicação de mensagens (Pub/Sub)
-
-1. Cliente envia `publish_message` ao servidor (Req/Rep)
-2. Servidor publica no tópico/canal correspondente (Pub/Sub)
-3. Clientes inscritos recebem a mensagem no canal
-
-Toda mensagem possui timestamp de envio; no cliente assinante também é exibido o timestamp de recebimento.
+### Plano de dados (Pub/Sub)
+- Servidor (PUB) → Proxy Pub/Sub (`5557/5558`) → Clientes (SUB)
 
 ---
 
-## Serialização
+## Portas
 
-A serialização é feita com **MessagePack** em Python e Java.
-
-Formato geral das mensagens Req/Rep:
-
-- `type`
-- `timestamp`
-- `payload`
-
-Formato da publicação no Pub/Sub:
-
-- `channel`
-- `message`
-- `username`
-- `sent_timestamp`
-- `published_timestamp`
+- Broker frontend: `5555`
+- Broker backend: `5556`
+- Pub/Sub XSUB: `5557`
+- Pub/Sub XPUB: `5558`
+- Referência: `5559`
 
 ---
 
-## Persistência
+## Relógio lógico
 
-O servidor Python mantém estado local em `state.msgpack` com:
+Clientes/bots e servidores mantêm um contador lógico.
 
-- `logins`
-- `channels`
-- `publications`
+Regras aplicadas:
 
-Cada publicação gravada contém usuário, canal, conteúdo e timestamps.
+1. antes de **enviar** mensagem: incrementa contador e envia no campo `logical_clock`
+2. ao **receber** mensagem: atualiza o contador para `max(local, recebido)`
 
-A escrita em disco usa arquivo temporário + `fsync` + `replace` para reduzir risco de corrupção.
+Todas as mensagens seguem com:
+
+- `timestamp` (relógio físico)
+- `logical_clock` (relógio lógico)
 
 ---
 
-## Funcionamento dos bots (Python e Java)
+## Serviço de referência (Parte 3)
 
-Ao iniciar, os bots (Python e Java):
+Novo processo `reference.py` responsável por:
 
-1. Faz login
-2. Lista canais
-3. Se houver menos de 5 canais, cria um novo
-4. Se estiver inscrito em menos de 3 canais, se inscreve em mais um canal
-5. Entra em loop infinito:
-   - escolhe um canal aleatório
-   - envia 10 mensagens aleatórias
-   - aguarda 1 segundo entre mensagens
+- `register`: cadastrar servidor e devolver `rank`
+- `list`: devolver lista `{name, rank}` dos servidores ativos
+- `heartbeat`: atualizar disponibilidade do servidor e devolver `reference_time`
 
-Em paralelo, os bots mantêm um assinante ativo exibindo para cada mensagem recebida:
+Remoção de servidores inativos é feita por timeout de heartbeat.
 
-- canal
-- mensagem
-- timestamp de envio
-- timestamp de recebimento
+---
+
+## Sincronização de relógio físico
+
+Cada servidor, ao registrar e a cada heartbeat, recebe `reference_time`.
+
+Com isso calcula um `offset` local:
+
+`offset = reference_time - local_time`
+
+e passa a usar `local_time + offset` como timestamp físico sincronizado.
+
+---
+
+## Heartbeat
+
+Cada servidor envia heartbeat ao serviço de referência **a cada 10 mensagens de clientes processadas**.
+
+Esse heartbeat:
+
+- mantém o servidor na lista de ativos
+- atualiza o relógio físico via `reference_time`
 
 ---
 
@@ -115,17 +93,12 @@ Na pasta `request-reply2/src/broker`:
 docker compose up --build
 ```
 
-Esse comando inicializa:
+Serviços iniciados:
 
 - `broker`
 - `pubsub-proxy`
+- `reference`
 - `servidor` (Python)
 - `cliente` (Python)
 - `servidor-java`
 - `cliente-java`
-
----
-
-## Observação sobre consistência
-
-Como cada servidor mantém estado local independente, múltiplos servidores sem replicação podem apresentar visões diferentes de canais/publicações.

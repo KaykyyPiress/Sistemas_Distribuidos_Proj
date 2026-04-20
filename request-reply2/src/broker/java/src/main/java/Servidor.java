@@ -18,13 +18,14 @@ public class Servidor {
     private static final Path STATE_FILE = Path.of("/data/state_java.msgpack");
     private static final Pattern USER_REGEX = Pattern.compile("^[a-zA-Z0-9_]{3,20}$");
     private static final Pattern CHAN_REGEX = Pattern.compile("^[a-zA-Z0-9_-]{3,50}$");
+    private static final int HEARTBEAT_EVERY_MESSAGES = 10;
+
+    private static long logicalClock = 0;
+    private static double clockOffset = 0.0;
 
     public static void main(String[] args) throws Exception {
         Map<String, Object> state = loadState();
-        System.out.println("[SERVIDOR-JAVA] Estado carregado: "
-            + getList(state, "logins").size() + " login(s), "
-            + getList(state, "channels").size() + " canal(is), "
-            + getList(state, "publications").size() + " publicacao(oes).");
+        String serverName = System.getenv().getOrDefault("SERVER_NAME", "servidor-java");
 
         try (ZContext ctx = new ZContext()) {
             ZMQ.Socket repSocket = ctx.createSocket(SocketType.REP);
@@ -33,13 +34,27 @@ public class Servidor {
             ZMQ.Socket pubSocket = ctx.createSocket(SocketType.PUB);
             pubSocket.connect("tcp://pubsub-proxy:5557");
 
-            System.out.println("[SERVIDOR-JAVA] Conectado ao broker (5556) e ao proxy Pub/Sub (5557). Aguardando...");
+            ZMQ.Socket refSocket = ctx.createSocket(SocketType.REQ);
+            refSocket.connect("tcp://reference:5559");
+
+            Map<String, Object> registerReply = callReference(refSocket, mapOf("type", "register", "name", serverName));
+            int serverRank = ((Number) registerReply.getOrDefault("rank", -1)).intValue();
+            updateClockOffset(registerReply);
+
+            System.out.println("[SERVIDOR-JAVA] " + serverName + " rank=" + serverRank
+                + " | Estado: " + getList(state, "logins").size() + " login(s), "
+                + getList(state, "channels").size() + " canal(is), "
+                + getList(state, "publications").size() + " publicacao(oes).");
+
+            int messagesSinceHeartbeat = 0;
 
             while (!Thread.currentThread().isInterrupted()) {
                 byte[] raw = repSocket.recv();
                 Map<String, Object> msg = MsgHelper.unpack(raw);
+                mergeClock(msg.get("logical_clock"));
+
                 String type = (String) msg.getOrDefault("type", "");
-                System.out.println("[SERVIDOR-JAVA] Mensagem recebida: type=" + type);
+                System.out.println("[SERVIDOR-JAVA] Mensagem recebida: type=" + type + " lc=" + logicalClock);
 
                 Map<String, Object> response;
                 switch (type) {
@@ -60,6 +75,16 @@ public class Servidor {
                         break;
                 }
                 repSocket.send(MsgHelper.pack(response));
+
+                messagesSinceHeartbeat++;
+                if (messagesSinceHeartbeat >= HEARTBEAT_EVERY_MESSAGES) {
+                    Map<String, Object> hbReply = callReference(
+                        refSocket,
+                        mapOf("type", "heartbeat", "name", serverName, "rank", serverRank)
+                    );
+                    updateClockOffset(hbReply);
+                    messagesSinceHeartbeat = 0;
+                }
             }
         }
     }
@@ -105,7 +130,6 @@ public class Servidor {
 
     private static Map<String, Object> handleListChannels(Map<String, Object> state) {
         List<Object> channels = getList(state, "channels");
-        System.out.println("[LISTAR CANAIS] Enviando " + channels.size() + " canal(is).");
         Map<String, Object> pl = new LinkedHashMap<>();
         pl.put("channels", channels);
         return makeResponse("ok", pl);
@@ -134,6 +158,7 @@ public class Servidor {
         publication.put("username", username);
         publication.put("sent_timestamp", sentTimestamp);
         publication.put("published_timestamp", publishedTimestamp);
+        publication.put("logical_clock", tickClock());
 
         pubSocket.sendMore(channel.getBytes(StandardCharsets.UTF_8));
         pubSocket.send(MsgHelper.pack(publication));
@@ -141,7 +166,6 @@ public class Servidor {
         getList(state, "publications").add(publication);
         saveState(state);
 
-        System.out.println("[PUB-JAVA] " + username + " publicou em " + channel + ": " + message);
         return makeResponse("ok", map("message", "Publicacao enviada com sucesso."));
     }
 
@@ -149,8 +173,30 @@ public class Servidor {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("status", status);
         r.put("timestamp", now());
+        r.put("logical_clock", tickClock());
         r.put("payload", payload);
         return r;
+    }
+
+    private static synchronized void mergeClock(Object received) {
+        long r = (received == null) ? 0 : ((Number) received).longValue();
+        logicalClock = Math.max(logicalClock, r);
+    }
+
+    private static synchronized long tickClock() {
+        logicalClock += 1;
+        return logicalClock;
+    }
+
+    private static void updateClockOffset(Map<String, Object> reply) {
+        Object ref = reply.get("reference_time");
+        if (ref instanceof Number) {
+            clockOffset = ((Number) ref).doubleValue() - (System.currentTimeMillis() / 1000.0);
+        }
+    }
+
+    private static double now() {
+        return (System.currentTimeMillis() / 1000.0) + clockOffset;
     }
 
     private static Map<String, Object> map(String k, Object v) {
@@ -159,8 +205,17 @@ public class Servidor {
         return m;
     }
 
-    private static double now() {
-        return System.currentTimeMillis() / 1000.0;
+    private static Map<String, Object> mapOf(Object... kv) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (int i = 0; i < kv.length; i += 2) {
+            m.put(kv[i].toString(), kv[i + 1]);
+        }
+        return m;
+    }
+
+    private static Map<String, Object> callReference(ZMQ.Socket refSocket, Map<String, Object> req) throws Exception {
+        refSocket.send(MsgHelper.pack(req));
+        return MsgHelper.unpack(refSocket.recv());
     }
 
     private static double toDouble(Object o) {
@@ -204,7 +259,6 @@ public class Servidor {
                 state.put("publications", publications instanceof List ? publications : new ArrayList<>());
             }
         } catch (Exception e) {
-            System.out.println("[SERVIDOR-JAVA] Aviso: estado invalido ou corrompido. Reiniciando estado. Motivo: " + e.getMessage());
             state = emptyState();
         }
 

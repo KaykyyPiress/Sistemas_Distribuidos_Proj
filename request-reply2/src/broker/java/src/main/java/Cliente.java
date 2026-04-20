@@ -20,15 +20,15 @@ public class Cliente {
     private static final int MIN_CHANNELS = 5;
     private static final int MIN_SUBSCRIPTIONS = 3;
 
+    private static long logicalClock = 0;
+
     public static void main(String[] args) throws Exception {
         try (ZContext ctx = new ZContext()) {
             ZMQ.Socket req = ctx.createSocket(SocketType.REQ);
             req.connect(BROKER_URL);
-            System.out.println("[CLIENTE-JAVA] Conectado ao broker em " + BROKER_URL);
 
             ZMQ.Socket sub = ctx.createSocket(SocketType.SUB);
             sub.connect(SUB_URL);
-            System.out.println("[CLIENTE-JAVA] Conectado ao proxy Pub/Sub em " + SUB_URL);
 
             final boolean[] running = new boolean[]{true};
             Thread listener = new Thread(() -> listenSubscriptions(sub, running));
@@ -49,12 +49,9 @@ public class Cliente {
                     }
                 }
 
-                subscribeIfNeeded(sub, canais, subscribedChannels, random);
-
                 while (true) {
                     canais = listarCanais(req);
                     if (canais.isEmpty()) {
-                        System.out.println("[CLIENTE-JAVA] Nenhum canal disponível. Tentando novamente em 2s...");
                         Thread.sleep(2000);
                         continue;
                     }
@@ -73,7 +70,6 @@ public class Cliente {
             } finally {
                 running[0] = false;
                 listener.join(500);
-                System.out.println("[CLIENTE-JAVA] Encerrando.");
             }
         }
     }
@@ -86,27 +82,29 @@ public class Cliente {
             if (topic == null) {
                 continue;
             }
-
             byte[] payloadRaw = sub.recv(0);
             if (payloadRaw == null) {
                 continue;
             }
 
-            double receivedTimestamp = now();
-
             try {
                 Map<String, Object> payload = MsgHelper.unpack(payloadRaw);
+                mergeClock(payload.get("logical_clock"));
+
                 String channel = payload.getOrDefault("channel", new String(topic, StandardCharsets.UTF_8)).toString();
                 String message = payload.getOrDefault("message", "").toString();
                 Object sentTimestamp = payload.getOrDefault("sent_timestamp", "?");
+                double receivedTimestamp = now();
+
                 System.out.println(
                     "[SUB-JAVA] canal=" + channel
                         + " | mensagem=" + message
                         + " | ts_envio=" + sentTimestamp
                         + " | ts_recebimento=" + receivedTimestamp
+                        + " | lc=" + logicalClock
                 );
             } catch (Exception e) {
-                System.out.println("[SUB-JAVA] Erro ao processar mensagem recebida: " + e.getMessage());
+                System.out.println("[SUB-JAVA] Erro ao processar mensagem: " + e.getMessage());
             }
         }
     }
@@ -133,13 +131,9 @@ public class Cliente {
             payload.put("username", username);
             Map<String, Object> req = buildRequest("login", payload);
             Map<String, Object> reply = sendRequest(socket, req);
-            System.out.println("[LOGIN] Resposta: " + reply);
             if ("ok".equals(reply.get("status"))) {
-                System.out.println("[LOGIN] Login bem-sucedido como: " + username);
                 return;
             }
-            Object msg = ((Map<?, ?>) reply.getOrDefault("payload", new HashMap<>())).get("message");
-            System.out.println("[LOGIN] Falha: " + msg + ". Tentando em 3s...");
             Thread.sleep(3000);
         }
     }
@@ -148,13 +142,11 @@ public class Cliente {
     private static List<String> listarCanais(ZMQ.Socket socket) throws Exception {
         Map<String, Object> req = buildRequest("list_channels", new LinkedHashMap<>());
         Map<String, Object> reply = sendRequest(socket, req);
-        System.out.println("[LISTAR CANAIS] Resposta: " + reply);
         if ("ok".equals(reply.get("status"))) {
             Map<String, Object> pl = (Map<String, Object>) reply.getOrDefault("payload", new HashMap<>());
             List<Object> raw = (List<Object>) pl.getOrDefault("channels", new ArrayList<>());
             List<String> canais = new ArrayList<>();
             for (Object o : raw) canais.add(o.toString());
-            System.out.println("[LISTAR CANAIS] Canais: " + canais);
             return canais;
         }
         return new ArrayList<>();
@@ -166,15 +158,7 @@ public class Cliente {
         payload.put("channel", canal);
         Map<String, Object> req = buildRequest("create_channel", payload);
         Map<String, Object> reply = sendRequest(socket, req);
-        System.out.println("[CRIAR CANAL] Resposta: " + reply);
-        if ("ok".equals(reply.get("status"))) {
-            System.out.println("[CRIAR CANAL] Canal criado: " + canal);
-            return true;
-        } else {
-            Object msg = ((Map<?, ?>) reply.getOrDefault("payload", new HashMap<>())).get("message");
-            System.out.println("[CRIAR CANAL] Erro: " + msg);
-            return false;
-        }
+        return "ok".equals(reply.get("status"));
     }
 
     private static void publicar(ZMQ.Socket socket, String username, String canal, String mensagem) throws Exception {
@@ -184,13 +168,7 @@ public class Cliente {
         payload.put("message", mensagem);
 
         Map<String, Object> req = buildRequest("publish_message", payload);
-        Map<String, Object> reply = sendRequest(socket, req);
-        if ("ok".equals(reply.get("status"))) {
-            System.out.println("[PUB-REQ-JAVA] Publicação confirmada em " + canal);
-        } else {
-            Object msg = ((Map<?, ?>) reply.getOrDefault("payload", new HashMap<>())).get("message");
-            System.out.println("[PUB-REQ-JAVA] Falha: " + msg);
-        }
+        sendRequest(socket, req);
     }
 
     private static String generateChannelName(String username, Random random) {
@@ -210,6 +188,16 @@ public class Cliente {
         return sb.toString();
     }
 
+    private static synchronized void mergeClock(Object received) {
+        long r = (received == null) ? 0 : ((Number) received).longValue();
+        logicalClock = Math.max(logicalClock, r);
+    }
+
+    private static synchronized long tickClock() {
+        logicalClock += 1;
+        return logicalClock;
+    }
+
     private static double now() {
         return System.currentTimeMillis() / 1000.0;
     }
@@ -218,14 +206,16 @@ public class Cliente {
         Map<String, Object> req = new LinkedHashMap<>();
         req.put("type", type);
         req.put("timestamp", now());
+        req.put("logical_clock", tickClock());
         req.put("payload", payload);
         return req;
     }
 
     private static Map<String, Object> sendRequest(ZMQ.Socket socket, Map<String, Object> req) throws Exception {
-        System.out.println("[CLIENTE-JAVA] Enviando: " + req);
         socket.send(MsgHelper.pack(req));
         byte[] raw = socket.recv();
-        return MsgHelper.unpack(raw);
+        Map<String, Object> reply = MsgHelper.unpack(raw);
+        mergeClock(reply.get("logical_clock"));
+        return reply;
     }
 }

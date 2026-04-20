@@ -24,6 +24,17 @@ services:
       - "5557:5557"
       - "5558:5558"
 
+  reference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    container_name: reference
+    volumes:
+      - ./reference.py:/app/main.py
+    ports:
+      - "5559:5559"
+
   servidor:
     build:
       context: .
@@ -32,9 +43,12 @@ services:
     volumes:
       - ./servidor.py:/app/main.py
       - servidor_data:/app
+    environment:
+      - SERVER_NAME=servidor-py
     depends_on:
       - broker
       - pubsub-proxy
+      - reference
 
   cliente:
     build:
@@ -55,11 +69,13 @@ services:
     image: cc7261:java
     environment:
       - APP_MODE=servidor
+      - SERVER_NAME=servidor-java
     volumes:
       - servidor_java_data:/data
     depends_on:
       - broker
       - pubsub-proxy
+      - reference
 
   cliente-java:
     build:

@@ -1,130 +1,104 @@
-# Projeto de Sistemas Distribuídos – Parte 1
+# Projeto de Sistemas Distribuídos – Parte 3
 
-## Introdução
+## Objetivo
 
-Este projeto implementa um sistema distribuído baseado no padrão cliente-servidor com a utilização de um broker intermediário. O objetivo desta primeira parte é permitir que clientes realizem login, criem canais de comunicação e listem os canais existentes.
+Nesta etapa foram adicionados:
 
-A arquitetura do sistema é composta por três principais componentes:
-
-- **Cliente**: responsável por enviar requisições ao sistema  
-- **Broker**: intermediário responsável por encaminhar mensagens entre clientes e servidores  
-- **Servidor**: responsável por processar as requisições e manter o estado da aplicação  
-
-A comunicação segue o padrão *request-reply* utilizando sockets.
-
----
-
-## Portas utilizadas
-
-- **Broker (frontend - clientes)**: `tcp://localhost:5555`  
-- **Broker (backend - servidores)**: `tcp://localhost:5556`  
+1. **Relógio lógico (Lamport)** em clientes/bots e servidores
+2. **Serviço de referência** para:
+   - atribuição de rank aos servidores
+   - manutenção da lista de servidores ativos
+   - atualização por heartbeat
+   - sincronização de relógio físico dos servidores
 
 ---
 
-## Funcionamento geral
+## Arquitetura
 
-O fluxo de comunicação do sistema ocorre da seguinte forma:
+### Plano de controle (Req/Rep)
+- Cliente ↔ Broker (`5555/5556`) ↔ Servidor
+- Servidor ↔ Referência (`5559`)
 
-1. O cliente envia uma requisição para o broker  
-2. O broker encaminha a requisição para um dos servidores disponíveis  
-3. O servidor processa a requisição  
-4. A resposta retorna ao cliente através do broker  
-
-### Fluxo simplificado
-
-Cliente → Broker → Servidor  
-Cliente ← Broker ← Servidor
+### Plano de dados (Pub/Sub)
+- Servidor (PUB) → Proxy Pub/Sub (`5557/5558`) → Clientes (SUB)
 
 ---
 
-## Tecnologias utilizadas
+## Portas
 
-### Linguagens
-
-Foram utilizadas as linguagens **Python** e **Java**. A escolha foi feita com base na familiaridade prévia do grupo com essas tecnologias, permitindo maior agilidade no desenvolvimento e integração dos componentes.
-
----
-
-## Serialização
-
-A comunicação entre os componentes é realizada utilizando **MessagePack**, um formato de serialização binário.
-
-### Motivos da escolha:
-
-- Atende ao requisito do projeto de não utilizar JSON ou texto simples  
-- Possui melhor desempenho que JSON  
-- Gera mensagens menores (mais eficiente para rede)  
-- Suporte tanto em Python quanto em Java  
-
-Todas as mensagens trocadas no sistema possuem:
-
-- Tipo da requisição  
-- Payload (dados)  
-- Timestamp de envio  
+- Broker frontend: `5555`
+- Broker backend: `5556`
+- Pub/Sub XSUB: `5557`
+- Pub/Sub XPUB: `5558`
+- Referência: `5559`
 
 ---
 
-## Persistência
+## Relógio lógico
 
-Cada servidor mantém seu próprio estado local, armazenado em disco utilizando arquivos no formato MessagePack.
+Clientes/bots e servidores mantêm um contador lógico.
 
-### Dados persistidos:
+Regras aplicadas:
 
-- Usuários que realizaram login (com timestamp)  
-- Lista de canais criados  
+1. antes de **enviar** mensagem: incrementa contador e envia no campo `logical_clock`
+2. ao **receber** mensagem: atualiza o contador para `max(local, recebido)`
 
-Cada servidor possui seu próprio arquivo de estado, não sendo compartilhado com outros servidores, conforme especificação do projeto.
+Todas as mensagens seguem com:
 
----
-
-## Importante sobre consistência
-
-Como cada servidor mantém seu próprio estado independente e o broker distribui as requisições entre múltiplos servidores, pode ocorrer inconsistência na visão do cliente.
-
-### Exemplo:
-
-- Um canal pode ser criado em um servidor  
-- Outro servidor pode não conhecer esse canal  
-- Requisições consecutivas podem retornar resultados diferentes  
-
-Essa característica é esperada em sistemas distribuídos sem replicação de estado e não foi tratada nesta etapa do projeto.
+- `timestamp` (relógio físico)
+- `logical_clock` (relógio lógico)
 
 ---
 
-## Funcionalidades implementadas
+## Serviço de referência (Parte 3)
 
-- Login de usuários  
-- Criação de canais  
-- Listagem de canais  
-- Comunicação distribuída com broker  
-- Persistência de dados em disco  
-- Serialização binária com MessagePack  
-- Uso de timestamp em todas as mensagens  
+Novo processo `reference.py` responsável por:
+
+- `register`: cadastrar servidor e devolver `rank`
+- `list`: devolver lista `{name, rank}` dos servidores ativos
+- `heartbeat`: atualizar disponibilidade do servidor e devolver `reference_time`
+
+Remoção de servidores inativos é feita por timeout de heartbeat.
+
+---
+
+## Sincronização de relógio físico
+
+Cada servidor, ao registrar e a cada heartbeat, recebe `reference_time`.
+
+Com isso calcula um `offset` local:
+
+`offset = reference_time - local_time`
+
+e passa a usar `local_time + offset` como timestamp físico sincronizado.
+
+---
+
+## Heartbeat
+
+Cada servidor envia heartbeat ao serviço de referência **a cada 10 mensagens de clientes processadas**.
+
+Esse heartbeat:
+
+- mantém o servidor na lista de ativos
+- atualiza o relógio físico via `reference_time`
 
 ---
 
 ## Execução
 
-O projeto pode ser executado com Docker através do comando:
+Na pasta `request-reply2/src/broker`:
 
-docker compose up
+```bash
+docker compose up --build
+```
 
-Esse comando inicializa:
+Serviços iniciados:
 
-- Broker  
-- Servidores (Python e Java)  
-- Clientes (Python e Java)  
-
-Permitindo simular um ambiente distribuído completo.
-
----
-
-## Considerações finais
-
-Esta primeira etapa estabelece a base do sistema distribuído, definindo:
-
-- Estrutura de comunicação  
-- Formato das mensagens  
-- Persistência de dados  
-
-As próximas etapas do projeto irão expandir o sistema, adicionando funcionalidades como envio e armazenamento de mensagens entre usuários nos canais.
+- `broker`
+- `pubsub-proxy`
+- `reference`
+- `servidor` (Python)
+- `cliente` (Python)
+- `servidor-java`
+- `cliente-java`

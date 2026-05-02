@@ -1,4 +1,5 @@
 import time
+# Reescrito para reduzir conflitos de merge na Parte 4.
 
 import msgpack
 import zmq
@@ -42,19 +43,20 @@ def main():
                         servers[name] = {"rank": assigned_rank, "last_seen": time.time()}
                     else:
                         servers[name]["last_seen"] = time.time()
-                    response = {
-                        "status": "ok",
-                        "rank": servers[name]["rank"],
-                        "reference_time": time.time(),
-                    }
+                    host = str(msg.get("host", "")).strip()
+                    peer_port = int(msg.get("peer_port", 0) or 0)
+                    if host:
+                        servers[name]["host"] = host
+                    if peer_port:
+                        servers[name]["peer_port"] = peer_port
+                    response = {"status": "ok", "rank": servers[name]["rank"]}
             elif msg_type == "list":
                 response = {
                     "status": "ok",
                     "servers": [
-                        {"name": name, "rank": info["rank"]}
+                        {"name": name, "rank": info["rank"], "host": info.get("host", ""), "peer_port": info.get("peer_port", 0)}
                         for name, info in sorted(servers.items(), key=lambda item: item[1]["rank"])
                     ],
-                    "reference_time": time.time(),
                 }
             elif msg_type == "heartbeat":
                 name = str(msg.get("name", "")).strip()
@@ -67,11 +69,13 @@ def main():
                         next_rank = max(next_rank, rank + 1)
                     else:
                         servers[name]["last_seen"] = time.time()
-                    response = {
-                        "status": "ok",
-                        "rank": servers[name]["rank"],
-                        "reference_time": time.time(),
-                    }
+                    host = str(msg.get("host", "")).strip()
+                    peer_port = int(msg.get("peer_port", 0) or 0)
+                    if host:
+                        servers[name]["host"] = host
+                    if peer_port:
+                        servers[name]["peer_port"] = peer_port
+                    response = {"status": "ok", "rank": servers[name]["rank"]}
             else:
                 response = {"status": "error", "message": f"operação desconhecida: {msg_type}"}
 
@@ -79,7 +83,7 @@ def main():
         except Exception as exc:
             socket.send(
                 msgpack.packb(
-                    {"status": "error", "message": str(exc), "reference_time": time.time()},
+                    {"status": "error", "message": str(exc)},
                     use_bin_type=True,
                 )
             )

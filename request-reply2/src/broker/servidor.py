@@ -1,4 +1,5 @@
 import os
+# Reescrito para reduzir conflitos de merge na Parte 4.
 import re
 import socket as pysocket
 import time
@@ -11,7 +12,9 @@ STATE_FILE = Path("state.msgpack")
 USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
 CHANNEL_REGEX = re.compile(r"^[a-zA-Z0-9_-]{3,50}$")
 DEFAULT_STATE = {"logins": [], "channels": [], "publications": []}
-HEARTBEAT_EVERY_MESSAGES = 10
+SYNC_EVERY_MESSAGES = 15
+STATE_SYNC_TOPIC = "servers.state"
+COORDINATOR_TOPIC = "servers"
 
 
 class LamportClock:
@@ -108,6 +111,24 @@ def handle_create_channel(msg, state, lamport_clock, now_fn):
     return make_response("ok", lamport_clock, now_fn, {"message": f"Canal {channel} criado com sucesso."})
 
 
+def apply_state_sync_event(event, state):
+    event_type = event.get("type")
+    changed = False
+    if event_type == "channel_created":
+        channel = str(event.get("channel", "")).strip()
+        if channel and channel not in state["channels"]:
+            state["channels"].append(channel)
+            changed = True
+    elif event_type == "channels_snapshot":
+        for channel in event.get("channels", []):
+            channel = str(channel).strip()
+            if channel and channel not in state["channels"]:
+                state["channels"].append(channel)
+                changed = True
+    if changed:
+        save_state(state)
+
+
 def handle_list_channels(state, lamport_clock, now_fn):
     channels = state.get("channels", [])
     print(f"[LISTAR CANAIS] Enviando {len(channels)} canal(is).", flush=True)
@@ -162,10 +183,13 @@ def main():
     state = load_state()
 
     lamport_clock = LamportClock()
-    clock_offset = 0.0
+    coordinator = None
+    peer_host = os.getenv("PEER_HOST", server_name)
+    peer_port = int(os.getenv("PEER_PORT", "6000"))
+    server_rank = -1
 
     def now_synced():
-        return time.time() + clock_offset
+        return time.time()
 
     context = zmq.Context()
 
@@ -174,18 +198,23 @@ def main():
 
     pub_socket = context.socket(zmq.PUB)
     pub_socket.connect("tcp://pubsub-proxy:5557")
+    sub_socket = context.socket(zmq.SUB)
+    sub_socket.connect("tcp://pubsub-proxy:5558")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, "servers")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, STATE_SYNC_TOPIC)
 
     ref_socket = context.socket(zmq.REQ)
     ref_socket.connect("tcp://reference:5559")
+    peer_rep = context.socket(zmq.REP)
+    peer_rep.bind(f"tcp://*:{peer_port}")
 
     def call_reference(req):
         ref_socket.send(msgpack.packb(req, use_bin_type=True))
         return msgpack.unpackb(ref_socket.recv(), raw=False)
 
-    register_reply = call_reference({"type": "register", "name": server_name})
-    server_rank = register_reply.get("rank", -1)
-    nonlocal_offset = register_reply.get("reference_time", time.time()) - time.time()
-    clock_offset = nonlocal_offset
+    register_reply = call_reference({"type": "register", "name": server_name, "host": peer_host, "peer_port": peer_port})
+    server_rank = int(register_reply.get("rank", -1))
+    coordinator = server_name
 
     print(
         f"[SERVIDOR] {server_name} rank={server_rank}. "
@@ -193,10 +222,91 @@ def main():
         flush=True,
     )
 
-    messages_since_hb = 0
+    messages_since_sync = 0
+
+    def reference_list():
+        return call_reference({"type": "list"}).get("servers", [])
+
+    def peer_request(server_info, payload):
+        host = server_info.get("host")
+        port = int(server_info.get("peer_port") or 0)
+        if not host or not port:
+            return None
+        s = context.socket(zmq.REQ)
+        s.setsockopt(zmq.RCVTIMEO, 800)
+        s.setsockopt(zmq.SNDTIMEO, 800)
+        s.connect(f"tcp://{host}:{port}")
+        try:
+            s.send(msgpack.packb(payload, use_bin_type=True))
+            return msgpack.unpackb(s.recv(), raw=False)
+        except Exception:
+            return None
+        finally:
+            s.close(0)
+
+    def start_election(servers):
+        nonlocal coordinator
+        better = [s for s in servers if int(s.get("rank", 10**9)) < server_rank and s.get("name") != server_name]
+        got_ok = False
+        for s in better:
+            reply = peer_request(s, {"type": "election", "from": server_name, "rank": server_rank})
+            if reply and reply.get("status") == "ok":
+                got_ok = True
+        if not got_ok:
+            coordinator = server_name
+            pub_socket.send_multipart([COORDINATOR_TOPIC.encode(), msgpack.packb({"coordinator": server_name}, use_bin_type=True)])
+
+    def refresh_coordinator():
+        nonlocal coordinator
+        servers = reference_list()
+        if not servers:
+            coordinator = server_name
+            return
+        elected = min(servers, key=lambda s: int(s.get("rank", 10**9)))
+        previous = coordinator
+        coordinator = elected.get("name", server_name)
+        if previous != coordinator and coordinator == server_name:
+            pub_socket.send_multipart([COORDINATOR_TOPIC.encode(), msgpack.packb({"coordinator": server_name}, use_bin_type=True)])
+
+        if coordinator != server_name:
+            target = next((s for s in servers if s.get("name") == coordinator), None)
+            reply = peer_request(target, {"type": "berkeley_time_request", "from": server_name}) if target else None
+            if not reply or "reference_time" not in reply:
+                start_election(servers)
+        pub_socket.send_multipart(
+            [
+                STATE_SYNC_TOPIC.encode("utf-8"),
+                msgpack.packb({"type": "channels_snapshot", "channels": list(state.get("channels", []))}, use_bin_type=True),
+            ]
+        )
 
     while True:
         try:
+            while True:
+                try:
+                    topic, raw_event = sub_socket.recv_multipart(flags=zmq.NOBLOCK)
+                    if topic.decode("utf-8") == STATE_SYNC_TOPIC:
+                        apply_state_sync_event(msgpack.unpackb(raw_event, raw=False), state)
+                except zmq.Again:
+                    break
+            try:
+                raw_peer = peer_rep.recv(flags=zmq.NOBLOCK)
+                peer_msg = msgpack.unpackb(raw_peer, raw=False)
+                ptype = peer_msg.get("type", "")
+                if ptype == "election":
+                    peer_rep.send(msgpack.packb({"status": "ok", "from": server_name}, use_bin_type=True))
+                    if int(peer_msg.get("rank", 10**9)) > server_rank:
+                        start_election(reference_list())
+                elif ptype == "berkeley_time_request":
+                    if coordinator == server_name:
+                        peer_rep.send(msgpack.packb({"status": "ok", "reference_time": time.time()}, use_bin_type=True))
+                    else:
+                        peer_rep.send(msgpack.packb({"status": "error"}, use_bin_type=True))
+                else:
+                    peer_rep.send(msgpack.packb({"status": "error"}, use_bin_type=True))
+            except zmq.Again:
+                pass
+
             raw = rep_socket.recv()
             msg = msgpack.unpackb(raw, raw=False)
             lamport_clock.merge(msg.get("logical_clock", 0))
@@ -207,6 +317,14 @@ def main():
                 response = handle_login(msg, state, lamport_clock, now_synced)
             elif msg_type == "create_channel":
                 response = handle_create_channel(msg, state, lamport_clock, now_synced)
+                if response.get("status") == "ok":
+                    created_channel = msg.get("payload", {}).get("channel", "").strip()
+                    pub_socket.send_multipart(
+                        [
+                            STATE_SYNC_TOPIC.encode("utf-8"),
+                            msgpack.packb({"type": "channel_created", "channel": created_channel}, use_bin_type=True),
+                        ]
+                    )
             elif msg_type == "list_channels":
                 response = handle_list_channels(state, lamport_clock, now_synced)
             elif msg_type == "publish_message":
@@ -215,13 +333,11 @@ def main():
                 response = make_response("error", lamport_clock, now_synced, {"message": f"Operacao desconhecida: {msg_type}"})
 
             rep_socket.send(msgpack.packb(response, use_bin_type=True))
-
-            messages_since_hb += 1
-            if messages_since_hb >= HEARTBEAT_EVERY_MESSAGES:
-                hb_reply = call_reference({"type": "heartbeat", "name": server_name, "rank": server_rank})
-                if hb_reply.get("status") == "ok":
-                    clock_offset = hb_reply.get("reference_time", time.time()) - time.time()
-                messages_since_hb = 0
+            call_reference({"type": "heartbeat", "name": server_name, "rank": server_rank, "host": peer_host, "peer_port": peer_port})
+            messages_since_sync += 1
+            if messages_since_sync >= SYNC_EVERY_MESSAGES:
+                refresh_coordinator()
+                messages_since_sync = 0
         except Exception as exc:
             print(f"[SERVIDOR] Erro inesperado: {exc}", flush=True)
             rep_socket.send(

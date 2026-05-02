@@ -1,4 +1,5 @@
 services:
+  # Reescrito para reduzir conflitos de merge na Parte 4.
 
   broker:
     build:
@@ -45,6 +46,8 @@ services:
       - servidor_data:/app
     environment:
       - SERVER_NAME=servidor-py
+      - PEER_HOST=servidor
+      - PEER_PORT=6000
     depends_on:
       - broker
       - pubsub-proxy
@@ -70,6 +73,8 @@ services:
     environment:
       - APP_MODE=servidor
       - SERVER_NAME=servidor-java
+      - PEER_HOST=servidor-java
+      - PEER_PORT=6001
     volumes:
       - servidor_java_data:/data
     depends_on:

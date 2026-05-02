@@ -1,15 +1,17 @@
-# Projeto de Sistemas Distribuídos – Parte 3
+# Projeto de Sistemas Distribuídos – Parte 4
+<!-- Arquivo reescrito para estabilizar merge da Parte 4 -->
 
 ## Objetivo
 
-Nesta etapa foram adicionados:
+Nesta etapa foram consolidados:
 
 1. **Relógio lógico (Lamport)** em clientes/bots e servidores
 2. **Serviço de referência** para:
    - atribuição de rank aos servidores
    - manutenção da lista de servidores ativos
    - atualização por heartbeat
-   - sincronização de relógio físico dos servidores
+3. **Eleição de coordenador** entre servidores (menor rank)
+4. **Sincronização de estado de canais** entre servidores Python e Java
 
 ---
 
@@ -50,38 +52,50 @@ Todas as mensagens seguem com:
 
 ---
 
-## Serviço de referência (Parte 3)
+## Serviço de referência (Parte 4)
 
 Novo processo `reference.py` responsável por:
 
 - `register`: cadastrar servidor e devolver `rank`
 - `list`: devolver lista `{name, rank}` dos servidores ativos
-- `heartbeat`: atualizar disponibilidade do servidor e devolver `reference_time`
+- `heartbeat`: atualizar disponibilidade do servidor e devolver `rank`
 
 Remoção de servidores inativos é feita por timeout de heartbeat.
 
 ---
 
-## Sincronização de relógio físico
+## Relógio físico
 
-Cada servidor, ao registrar e a cada heartbeat, recebe `reference_time`.
-
-Com isso calcula um `offset` local:
-
-`offset = reference_time - local_time`
-
-e passa a usar `local_time + offset` como timestamp físico sincronizado.
+Nesta parte, os servidores usam o relógio local (`time.time()` no Python e
+`System.currentTimeMillis()/1000.0` no Java) para timestamps físicos.
 
 ---
 
-## Heartbeat
+## Heartbeat e refresh do coordenador
 
-Cada servidor envia heartbeat ao serviço de referência **a cada 10 mensagens de clientes processadas**.
+Cada servidor envia heartbeat ao serviço de referência a cada requisição processada.
+Além disso, a cada **15 mensagens processadas** (`SYNC_EVERY_MESSAGES`), consulta
+`list` no serviço de referência para atualizar a eleição de coordenador.
 
-Esse heartbeat:
+O heartbeat mantém o servidor na lista de ativos.
 
-- mantém o servidor na lista de ativos
-- atualiza o relógio físico via `reference_time`
+## Eleição de coordenador
+
+A eleição é feita com base no menor `rank` entre os servidores ativos retornados
+por `reference:list`.
+
+## Sincronização de canais entre servidores
+
+Como o broker distribui requisições entre múltiplos servidores, o estado de canais
+é sincronizado por Pub/Sub no tópico `servers.state`.
+
+- Ao criar canal com sucesso, o servidor publica evento `channel_created`.
+- Os demais servidores consomem esse evento e atualizam seu estado local.
+- Periodicamente, os servidores também publicam `channels_snapshot` para reconciliar
+  diferenças acumuladas (ex.: restart, atraso de subscribe, perda de evento).
+
+Isso evita falhas intermitentes de publicação do tipo `Canal ... nao existe`
+quando `create_channel` e `publish_message` caem em instâncias diferentes.
 
 ---
 

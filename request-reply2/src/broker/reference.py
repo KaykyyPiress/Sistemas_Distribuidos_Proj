@@ -1,5 +1,4 @@
 import time
-# Reescrito para reduzir conflitos de merge na Parte 4.
 
 import msgpack
 import zmq

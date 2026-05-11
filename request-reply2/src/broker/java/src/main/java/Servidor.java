@@ -1,5 +1,4 @@
 import org.zeromq.SocketType;
-// Reescrito para reduzir conflitos de merge na Parte 4.
 import org.zeromq.ZContext;
 import org.zeromq.ZMQ;
 
@@ -62,7 +61,7 @@ public class Servidor {
             while (!Thread.currentThread().isInterrupted()) {
                 byte[] raw = repSocket.recv();
                 drainStateSync(subSocket, state);
-                handlePeerControl(peerRep, refSocket, serverName, serverRank, pubSocket);
+                handlePeerControl(peerRep, refSocket, serverName, serverRank, pubSocket, state);
                 Map<String, Object> msg = MsgHelper.unpack(raw);
                 mergeClock(msg.get("logical_clock"));
 
@@ -70,9 +69,24 @@ public class Servidor {
                 System.out.println("[SERVIDOR-JAVA] Mensagem recebida: type=" + type + " lc=" + logicalClock);
 
                 Map<String, Object> response;
+                if (("login".equals(type) || "create_channel".equals(type) || "publish_message".equals(type))
+                    && !coordinatorName.equals(serverName)) {
+                    Map<String, Object> target = findCoordinator(refSocket);
+                    Map<String, Object> forwarded = target == null ? null : peerRequest(target, mapOf("type", "client_request", "message", msg));
+                    response = forwarded != null ? forwarded : makeResponse("error", map("message", "coordinator indisponivel"));
+                } else {
                 switch (type) {
                     case "login":
                         response = handleLogin(msg, state);
+                        if ("ok".equals(response.get("status"))) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> payload = (Map<String, Object>) msg.getOrDefault("payload", new HashMap<>());
+                            String username = payload.getOrDefault("username", "").toString().trim();
+                            double loginTs = msg.containsKey("timestamp") ? toDouble(msg.get("timestamp")) : now();
+                            Map<String, Object> loginEvt = mapOf("type", "login_created", "login", mapOf("username", username, "login_timestamp", loginTs));
+                            pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
+                            pubSocket.send(MsgHelper.pack(loginEvt));
+                        }
                         break;
                     case "create_channel":
                         response = handleCreateChannel(msg, state);
@@ -90,10 +104,19 @@ public class Servidor {
                         break;
                     case "publish_message":
                         response = handlePublishMessage(msg, state, pubSocket);
+                        if ("ok".equals(response.get("status"))) {
+                            List<Object> pubs = getList(state, "publications");
+                            if (!pubs.isEmpty()) {
+                                Map<String, Object> evt = mapOf("type", "publication_created", "publication", pubs.get(pubs.size() - 1));
+                                pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
+                                pubSocket.send(MsgHelper.pack(evt));
+                            }
+                        }
                         break;
                     default:
                         response = makeResponse("error", map("message", "Operacao desconhecida: " + type));
                         break;
+                }
                 }
                 repSocket.send(MsgHelper.pack(response));
 
@@ -276,7 +299,19 @@ public class Servidor {
         }
     }
 
-    private static void handlePeerControl(ZMQ.Socket peerRep, ZMQ.Socket refSocket, String serverName, int serverRank, ZMQ.Socket pubSocket) throws Exception {
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> findCoordinator(ZMQ.Socket refSocket) throws Exception {
+        Map<String, Object> listReply = callReference(refSocket, mapOf("type", "list"));
+        List<Object> servers = (List<Object>) listReply.getOrDefault("servers", new ArrayList<>());
+        for (Object entry : servers) {
+            if (entry instanceof Map<?, ?> e && coordinatorName.equals(String.valueOf(e.get("name")))) {
+                return (Map<String, Object>) e;
+            }
+        }
+        return null;
+    }
+
+    private static void handlePeerControl(ZMQ.Socket peerRep, ZMQ.Socket refSocket, String serverName, int serverRank, ZMQ.Socket pubSocket, Map<String, Object> state) throws Exception {
         byte[] raw = peerRep.recv(ZMQ.DONTWAIT);
         if (raw == null) return;
         Map<String, Object> msg = MsgHelper.unpack(raw);
@@ -288,6 +323,29 @@ public class Servidor {
         } else if ("berkeley_time_request".equals(type)) {
             if (coordinatorName.equals(serverName)) peerRep.send(MsgHelper.pack(mapOf("status", "ok", "reference_time", now())));
             else peerRep.send(MsgHelper.pack(mapOf("status", "error")));
+        } else if ("client_request".equals(type)) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> reqMsg = (Map<String, Object>) msg.getOrDefault("message", new LinkedHashMap<>());
+            String reqType = String.valueOf(reqMsg.getOrDefault("type", ""));
+            Map<String, Object> response;
+            switch (reqType) {
+                case "login":
+                    response = handleLogin(reqMsg, state);
+                    break;
+                case "create_channel":
+                    response = handleCreateChannel(reqMsg, state);
+                    break;
+                case "publish_message":
+                    response = handlePublishMessage(reqMsg, state, pubSocket);
+                    break;
+                case "list_channels":
+                    response = handleListChannels(state);
+                    break;
+                default:
+                    response = makeResponse("error", map("message", "Operacao desconhecida: " + reqType));
+                    break;
+            }
+            peerRep.send(MsgHelper.pack(response));
         } else {
             peerRep.send(MsgHelper.pack(mapOf("status", "error")));
         }
@@ -307,11 +365,25 @@ public class Servidor {
             if (!STATE_SYNC_TOPIC.equals(topicStr)) continue;
             Map<String, Object> event = MsgHelper.unpack(payload);
             List<Object> channels = getList(state, "channels");
+            List<Object> logins = getList(state, "logins");
+            List<Object> publications = getList(state, "publications");
             boolean changed = false;
-            if ("channel_created".equals(event.get("type"))) {
+            if ("login_created".equals(event.get("type"))) {
+                Object login = event.get("login");
+                if (login instanceof Map<?, ?> && !logins.contains(login)) {
+                    logins.add(login);
+                    changed = true;
+                }
+            } else if ("channel_created".equals(event.get("type"))) {
                 String channel = event.getOrDefault("channel", "").toString().trim();
                 if (!channel.isEmpty() && !channels.contains(channel)) {
                     channels.add(channel);
+                    changed = true;
+                }
+            } else if ("publication_created".equals(event.get("type"))) {
+                Object publication = event.get("publication");
+                if (publication instanceof Map<?, ?> && !publications.contains(publication)) {
+                    publications.add(publication);
                     changed = true;
                 }
             } else if ("channels_snapshot".equals(event.get("type"))) {
@@ -321,6 +393,35 @@ public class Servidor {
                         String channel = String.valueOf(c).trim();
                         if (!channel.isEmpty() && !channels.contains(channel)) {
                             channels.add(channel);
+                            changed = true;
+                        }
+                    }
+                }
+            } else if ("state_snapshot".equals(event.get("type"))) {
+                Object rawLogins = event.get("logins");
+                if (rawLogins instanceof List<?> list) {
+                    for (Object l : list) {
+                        if (l instanceof Map<?, ?> && !logins.contains(l)) {
+                            logins.add(l);
+                            changed = true;
+                        }
+                    }
+                }
+                Object rawChannels = event.get("channels");
+                if (rawChannels instanceof List<?> list) {
+                    for (Object c : list) {
+                        String channel = String.valueOf(c).trim();
+                        if (!channel.isEmpty() && !channels.contains(channel)) {
+                            channels.add(channel);
+                            changed = true;
+                        }
+                    }
+                }
+                Object rawPublications = event.get("publications");
+                if (rawPublications instanceof List<?> list) {
+                    for (Object p : list) {
+                        if (p instanceof Map<?, ?> && !publications.contains(p)) {
+                            publications.add(p);
                             changed = true;
                         }
                     }
@@ -338,6 +439,13 @@ public class Servidor {
         evt.put("channels", new ArrayList<>(getList(state, "channels")));
         pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
         pubSocket.send(MsgHelper.pack(evt));
+        Map<String, Object> full = new LinkedHashMap<>();
+        full.put("type", "state_snapshot");
+        full.put("logins", new ArrayList<>(getList(state, "logins")));
+        full.put("channels", new ArrayList<>(getList(state, "channels")));
+        full.put("publications", new ArrayList<>(getList(state, "publications")));
+        pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
+        pubSocket.send(MsgHelper.pack(full));
     }
 
     private static Map<String, Object> map(String k, Object v) {

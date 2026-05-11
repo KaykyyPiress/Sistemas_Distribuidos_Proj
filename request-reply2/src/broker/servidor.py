@@ -1,5 +1,4 @@
 import os
-# Reescrito para reduzir conflitos de merge na Parte 4.
 import re
 import socket as pysocket
 import time
@@ -114,16 +113,40 @@ def handle_create_channel(msg, state, lamport_clock, now_fn):
 def apply_state_sync_event(event, state):
     event_type = event.get("type")
     changed = False
-    if event_type == "channel_created":
+    if event_type == "login_created":
+        login = event.get("login", {})
+        if isinstance(login, dict) and login not in state["logins"]:
+            state["logins"].append(login)
+            changed = True
+    elif event_type == "channel_created":
         channel = str(event.get("channel", "")).strip()
         if channel and channel not in state["channels"]:
             state["channels"].append(channel)
+            changed = True
+    elif event_type == "publication_created":
+        publication = event.get("publication", {})
+        if isinstance(publication, dict) and publication not in state["publications"]:
+            state["publications"].append(publication)
             changed = True
     elif event_type == "channels_snapshot":
         for channel in event.get("channels", []):
             channel = str(channel).strip()
             if channel and channel not in state["channels"]:
                 state["channels"].append(channel)
+                changed = True
+    elif event_type == "state_snapshot":
+        for login in event.get("logins", []):
+            if isinstance(login, dict) and login not in state["logins"]:
+                state["logins"].append(login)
+                changed = True
+        for channel in event.get("channels", []):
+            channel = str(channel).strip()
+            if channel and channel not in state["channels"]:
+                state["channels"].append(channel)
+                changed = True
+        for publication in event.get("publications", []):
+            if isinstance(publication, dict) and publication not in state["publications"]:
+                state["publications"].append(publication)
                 changed = True
     if changed:
         save_state(state)
@@ -279,6 +302,63 @@ def main():
                 msgpack.packb({"type": "channels_snapshot", "channels": list(state.get("channels", []))}, use_bin_type=True),
             ]
         )
+        pub_socket.send_multipart(
+            [
+                STATE_SYNC_TOPIC.encode("utf-8"),
+                msgpack.packb(
+                    {
+                        "type": "state_snapshot",
+                        "logins": list(state.get("logins", [])),
+                        "channels": list(state.get("channels", [])),
+                        "publications": list(state.get("publications", [])),
+                    },
+                    use_bin_type=True,
+                ),
+            ]
+        )
+
+    def process_client_message(msg):
+        msg_type = msg.get("type", "")
+        if msg_type == "login":
+            response = handle_login(msg, state, lamport_clock, now_synced)
+            if response.get("status") == "ok":
+                username = msg.get("payload", {}).get("username", "").strip()
+                login_timestamp = msg.get("timestamp", now_synced())
+                pub_socket.send_multipart(
+                    [
+                        STATE_SYNC_TOPIC.encode("utf-8"),
+                        msgpack.packb(
+                            {"type": "login_created", "login": {"username": username, "login_timestamp": login_timestamp}},
+                            use_bin_type=True,
+                        ),
+                    ]
+                )
+            return response
+        if msg_type == "create_channel":
+            response = handle_create_channel(msg, state, lamport_clock, now_synced)
+            if response.get("status") == "ok":
+                created_channel = msg.get("payload", {}).get("channel", "").strip()
+                pub_socket.send_multipart(
+                    [
+                        STATE_SYNC_TOPIC.encode("utf-8"),
+                        msgpack.packb({"type": "channel_created", "channel": created_channel}, use_bin_type=True),
+                    ]
+                )
+            return response
+        if msg_type == "list_channels":
+            return handle_list_channels(state, lamport_clock, now_synced)
+        if msg_type == "publish_message":
+            response = handle_publish_message(msg, state, pub_socket, lamport_clock, now_synced)
+            if response.get("status") == "ok":
+                publication = state["publications"][-1]
+                pub_socket.send_multipart(
+                    [
+                        STATE_SYNC_TOPIC.encode("utf-8"),
+                        msgpack.packb({"type": "publication_created", "publication": publication}, use_bin_type=True),
+                    ]
+                )
+            return response
+        return make_response("error", lamport_clock, now_synced, {"message": f"Operacao desconhecida: {msg_type}"})
 
     while True:
         try:
@@ -303,7 +383,12 @@ def main():
                     else:
                         peer_rep.send(msgpack.packb({"status": "error"}, use_bin_type=True))
                 else:
-                    peer_rep.send(msgpack.packb({"status": "error"}, use_bin_type=True))
+                    if ptype == "client_request":
+                        payload_msg = peer_msg.get("message", {})
+                        lamport_clock.merge(payload_msg.get("logical_clock", 0))
+                        peer_rep.send(msgpack.packb(process_client_message(payload_msg), use_bin_type=True))
+                    else:
+                        peer_rep.send(msgpack.packb({"status": "error"}, use_bin_type=True))
             except zmq.Again:
                 pass
 
@@ -313,24 +398,14 @@ def main():
             msg_type = msg.get("type", "")
             print(f"[SERVIDOR] Mensagem recebida: type={msg_type}, lc={lamport_clock.value}", flush=True)
 
-            if msg_type == "login":
-                response = handle_login(msg, state, lamport_clock, now_synced)
-            elif msg_type == "create_channel":
-                response = handle_create_channel(msg, state, lamport_clock, now_synced)
-                if response.get("status") == "ok":
-                    created_channel = msg.get("payload", {}).get("channel", "").strip()
-                    pub_socket.send_multipart(
-                        [
-                            STATE_SYNC_TOPIC.encode("utf-8"),
-                            msgpack.packb({"type": "channel_created", "channel": created_channel}, use_bin_type=True),
-                        ]
-                    )
-            elif msg_type == "list_channels":
-                response = handle_list_channels(state, lamport_clock, now_synced)
-            elif msg_type == "publish_message":
-                response = handle_publish_message(msg, state, pub_socket, lamport_clock, now_synced)
+            write_ops = {"login", "create_channel", "publish_message"}
+            if msg_type in write_ops and coordinator != server_name:
+                servers = reference_list()
+                target = next((s for s in servers if s.get("name") == coordinator), None)
+                forwarded = peer_request(target, {"type": "client_request", "message": msg}) if target else None
+                response = forwarded or make_response("error", lamport_clock, now_synced, {"message": "coordinator indisponivel"})
             else:
-                response = make_response("error", lamport_clock, now_synced, {"message": f"Operacao desconhecida: {msg_type}"})
+                response = process_client_message(msg)
 
             rep_socket.send(msgpack.packb(response, use_bin_type=True))
             call_reference({"type": "heartbeat", "name": server_name, "rank": server_rank, "host": peer_host, "peer_port": peer_port})

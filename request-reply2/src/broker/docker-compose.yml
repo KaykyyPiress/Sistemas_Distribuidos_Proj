@@ -35,64 +35,150 @@ services:
     ports:
       - "5559:5559"
 
-  servidor:
+  servidor-py-1:
     build:
       context: .
       dockerfile: Dockerfile
     image: cc7261:pyzmq
+    container_name: servidor-py-1
     volumes:
       - ./servidor.py:/app/main.py
-      - servidor_data:/app
+      - servidor_py_1_data:/app
     environment:
-      - SERVER_NAME=servidor-py
-      - PEER_HOST=servidor
+      - SERVER_NAME=servidor-py-1
+      - PEER_HOST=servidor-py-1
       - PEER_PORT=6000
     depends_on:
       - broker
       - pubsub-proxy
       - reference
 
-  cliente:
+  servidor-py-2:
     build:
       context: .
       dockerfile: Dockerfile
     image: cc7261:pyzmq
+    container_name: servidor-py-2
     volumes:
-      - ./cliente.py:/app/main.py
-    depends_on:
-      - broker
-      - pubsub-proxy
-      - servidor
-
-  servidor-java:
-    build:
-      context: ./java
-      dockerfile: Dockerfile
-    image: cc7261:java
+      - ./servidor.py:/app/main.py
+      - servidor_py_2_data:/app
     environment:
-      - APP_MODE=servidor
-      - SERVER_NAME=servidor-java
-      - PEER_HOST=servidor-java
-      - PEER_PORT=6001
-    volumes:
-      - servidor_java_data:/data
+      - SERVER_NAME=servidor-py-2
+      - PEER_HOST=servidor-py-2
+      - PEER_PORT=6002
     depends_on:
       - broker
       - pubsub-proxy
       - reference
 
-  cliente-java:
+  servidor-java-1:
     build:
       context: ./java
       dockerfile: Dockerfile
     image: cc7261:java
+    container_name: servidor-java-1
     environment:
-      - APP_MODE=cliente
+      - APP_MODE=servidor
+      - SERVER_NAME=servidor-java-1
+      - PEER_HOST=servidor-java-1
+      - PEER_PORT=6001
+    volumes:
+      - servidor_java_1_data:/data
     depends_on:
       - broker
       - pubsub-proxy
-      - servidor-java
+      - reference
+
+  servidor-java-2:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    image: cc7261:java
+    container_name: servidor-java-2
+    environment:
+      - APP_MODE=servidor
+      - SERVER_NAME=servidor-java-2
+      - PEER_HOST=servidor-java-2
+      - PEER_PORT=6003
+    volumes:
+      - servidor_java_2_data:/data
+    depends_on:
+      - broker
+      - pubsub-proxy
+      - reference
+
+  cliente-py-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    container_name: cliente-py-1
+    volumes:
+      - ./cliente.py:/app/main.py
+    environment:
+      - USERNAME=bot_py_01
+    depends_on:
+      - broker
+      - pubsub-proxy
+      - servidor-py-1
+      - servidor-py-2
+      - servidor-java-1
+      - servidor-java-2
+
+  cliente-py-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:pyzmq
+    container_name: cliente-py-2
+    volumes:
+      - ./cliente.py:/app/main.py
+    environment:
+      - USERNAME=bot_py_02
+    depends_on:
+      - broker
+      - pubsub-proxy
+      - servidor-py-1
+      - servidor-py-2
+      - servidor-java-1
+      - servidor-java-2
+
+  cliente-java-1:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    image: cc7261:java
+    container_name: cliente-java-1
+    environment:
+      - APP_MODE=cliente
+      - USERNAME=bot_java_01
+    depends_on:
+      - broker
+      - pubsub-proxy
+      - servidor-py-1
+      - servidor-py-2
+      - servidor-java-1
+      - servidor-java-2
+
+  cliente-java-2:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    image: cc7261:java
+    container_name: cliente-java-2
+    environment:
+      - APP_MODE=cliente
+      - USERNAME=bot_java_02
+    depends_on:
+      - broker
+      - pubsub-proxy
+      - servidor-py-1
+      - servidor-py-2
+      - servidor-java-1
+      - servidor-java-2
 
 volumes:
-  servidor_data:
-  servidor_java_data:
+  servidor_py_1_data:
+  servidor_py_2_data:
+  servidor_java_1_data:
+  servidor_java_2_data:

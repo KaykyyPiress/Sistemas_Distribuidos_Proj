@@ -1,3 +1,4 @@
+import os
 import random
 import string
 import threading
@@ -8,9 +9,12 @@ import zmq
 
 BROKER_URL = "tcp://broker:5555"
 SUB_URL = "tcp://pubsub-proxy:5558"
-USERNAME = "bot_01"
+
+USERNAME = os.getenv("USERNAME", "bot_01")
 MIN_CHANNELS = 5
 MIN_SUBSCRIPTIONS = 3
+PUBLISH_BATCH = 10
+PUBLISH_INTERVAL_SECONDS = 1
 
 
 class LamportClock:
@@ -55,6 +59,7 @@ def fazer_login(socket, username, lamport_clock):
     while True:
         req = build_request("login", {"username": username}, lamport_clock)
         reply = send_request(socket, req, lamport_clock)
+
         print(f"[LOGIN] Resposta: {reply}")
 
         if reply.get("status") == "ok":
@@ -69,6 +74,7 @@ def fazer_login(socket, username, lamport_clock):
 def listar_canais(socket, lamport_clock):
     req = build_request("list_channels", {}, lamport_clock)
     reply = send_request(socket, req, lamport_clock)
+
     print(f"[LISTAR CANAIS] Resposta: {reply}")
 
     if reply.get("status") == "ok":
@@ -82,9 +88,13 @@ def listar_canais(socket, lamport_clock):
 
 
 def criar_canal(socket, username, nome_canal, lamport_clock):
-    payload = {"username": username, "channel": nome_canal}
+    payload = {
+        "username": username,
+        "channel": nome_canal,
+    }
     req = build_request("create_channel", payload, lamport_clock)
     reply = send_request(socket, req, lamport_clock)
+
     print(f"[CRIAR CANAL] Resposta: {reply}")
 
     if reply.get("status") == "ok":
@@ -102,14 +112,17 @@ def publicar(socket, username, canal, mensagem, lamport_clock):
         "channel": canal,
         "message": mensagem,
     }
+
     req = build_request("publish_message", payload, lamport_clock)
     reply = send_request(socket, req, lamport_clock)
-    status = reply.get("status")
-    if status != "ok":
-        erro = reply.get("payload", {}).get("message", "erro desconhecido")
-        print(f"[PUB-REQ] Falha ao publicar em {canal!r}: {erro}")
-    else:
+
+    if reply.get("status") == "ok":
         print(f"[PUB-REQ] Publicação confirmada em {canal!r}.")
+        return True
+
+    erro = reply.get("payload", {}).get("message", "erro desconhecido")
+    print(f"[PUB-REQ] Falha ao publicar em {canal!r}: {erro}")
+    return False
 
 
 def generate_channel_name(username):
@@ -128,12 +141,23 @@ def listen_subscriptions(sub_socket, stop_event, lamport_clock):
 
     while not stop_event.is_set():
         events = dict(poller.poll(timeout=200))
+
         if sub_socket not in events:
             continue
 
-        topic, raw_payload = sub_socket.recv_multipart()
+        try:
+            topic, raw_payload = sub_socket.recv_multipart()
+        except Exception:
+            continue
+
         received_timestamp = time.time()
-        payload = msgpack.unpackb(raw_payload, raw=False)
+
+        try:
+            payload = msgpack.unpackb(raw_payload, raw=False)
+        except Exception as exc:
+            print(f"[SUB] Erro ao desserializar mensagem: {exc}")
+            continue
+
         lamport_clock.merge(payload.get("logical_clock", 0))
 
         channel = payload.get("channel", topic.decode("utf-8", errors="replace"))
@@ -143,9 +167,39 @@ def listen_subscriptions(sub_socket, stop_event, lamport_clock):
         print(
             "[SUB] "
             f"canal={channel} | mensagem={message} | "
-            f"ts_envio={sent_timestamp} | ts_recebimento={received_timestamp} | lc={lamport_clock.value}",
+            f"ts_envio={sent_timestamp} | ts_recebimento={received_timestamp} | "
+            f"lc={lamport_clock.value}",
             flush=True,
         )
+
+
+def ensure_minimum_channels(req_socket, username, lamport_clock):
+    canais = listar_canais(req_socket, lamport_clock)
+
+    while len(canais) < MIN_CHANNELS:
+        novo_canal = generate_channel_name(username)
+        criado = criar_canal(req_socket, username, novo_canal, lamport_clock)
+
+        if not criado:
+            break
+
+        canais = listar_canais(req_socket, lamport_clock)
+
+    return canais
+
+
+def ensure_minimum_subscriptions(sub_socket, canais, subscribed_channels):
+    while len(subscribed_channels) < MIN_SUBSCRIPTIONS:
+        candidatos = [canal for canal in canais if canal not in subscribed_channels]
+
+        if not candidatos:
+            return
+
+        canal = random.choice(candidatos)
+        sub_socket.setsockopt_string(zmq.SUBSCRIBE, canal)
+        subscribed_channels.add(canal)
+
+        print(f"[SUB] Inscrito no canal {canal!r}")
 
 
 def main():
@@ -161,7 +215,11 @@ def main():
     print(f"[CLIENTE] Conectado ao proxy Pub/Sub em {SUB_URL}")
 
     stop_event = threading.Event()
-    listener = threading.Thread(target=listen_subscriptions, args=(sub_socket, stop_event, lamport_clock), daemon=True)
+    listener = threading.Thread(
+        target=listen_subscriptions,
+        args=(sub_socket, stop_event, lamport_clock),
+        daemon=True,
+    )
     listener.start()
 
     subscribed_channels = set()
@@ -169,42 +227,34 @@ def main():
     try:
         fazer_login(req_socket, USERNAME, lamport_clock)
 
-        canais = listar_canais(req_socket, lamport_clock)
-        if len(canais) < MIN_CHANNELS:
-            novo_canal = generate_channel_name(USERNAME)
-            if criar_canal(req_socket, USERNAME, novo_canal, lamport_clock):
-                canais = listar_canais(req_socket, lamport_clock)
+        canais = ensure_minimum_channels(req_socket, USERNAME, lamport_clock)
 
         while True:
             canais = listar_canais(req_socket, lamport_clock)
+
             if not canais:
                 print("[CLIENTE] Nenhum canal disponível. Tentando novamente em 2s...")
                 time.sleep(2)
                 continue
 
-            while len(subscribed_channels) < MIN_SUBSCRIPTIONS:
-                candidatos = [c for c in canais if c not in subscribed_channels]
-                if not candidatos:
-                    break
-                canal = random.choice(candidatos)
-                sub_socket.setsockopt_string(zmq.SUBSCRIBE, canal)
-                subscribed_channels.add(canal)
-                print(f"[SUB] Inscrito no canal {canal!r}")
+            ensure_minimum_subscriptions(sub_socket, canais, subscribed_channels)
 
-            for _ in range(10):
+            for _ in range(PUBLISH_BATCH):
                 canal = random.choice(canais)
                 mensagem = generate_message()
                 publicar(req_socket, USERNAME, canal, mensagem, lamport_clock)
-                time.sleep(1)
+                time.sleep(PUBLISH_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:
         print("[CLIENTE] Encerrando por interrupção do usuário.")
     finally:
         stop_event.set()
         listener.join(timeout=1)
+
         req_socket.close(0)
         sub_socket.close(0)
         context.term()
+
         print("[CLIENTE] Encerrado.")
 
 

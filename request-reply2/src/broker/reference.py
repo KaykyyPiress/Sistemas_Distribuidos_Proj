@@ -8,7 +8,11 @@ HEARTBEAT_TTL_SECONDS = 60
 
 def prune_servers(servers):
     now = time.time()
-    stale = [name for name, info in servers.items() if now - info["last_seen"] > HEARTBEAT_TTL_SECONDS]
+    stale = [
+        name
+        for name, info in servers.items()
+        if now - info["last_seen"] > HEARTBEAT_TTL_SECONDS
+    ]
     for name in stale:
         del servers[name]
 
@@ -33,56 +37,103 @@ def main():
 
             if msg_type == "register":
                 name = str(msg.get("name", "")).strip()
+                host = str(msg.get("host", "")).strip()
+                peer_port = int(msg.get("peer_port", 0) or 0)
+
                 if not name:
-                    response = {"status": "error", "message": "name obrigatório"}
+                    response = {
+                        "status": "error",
+                        "message": "name obrigatório"
+                    }
                 else:
                     if name not in servers:
                         assigned_rank = next_rank
                         next_rank += 1
-                        servers[name] = {"rank": assigned_rank, "last_seen": time.time()}
+                        servers[name] = {
+                            "rank": assigned_rank,
+                            "last_seen": time.time(),
+                            "host": host,
+                            "peer_port": peer_port,
+                        }
                     else:
                         servers[name]["last_seen"] = time.time()
-                    host = str(msg.get("host", "")).strip()
-                    peer_port = int(msg.get("peer_port", 0) or 0)
-                    if host:
-                        servers[name]["host"] = host
-                    if peer_port:
-                        servers[name]["peer_port"] = peer_port
-                    response = {"status": "ok", "rank": servers[name]["rank"]}
+                        if host:
+                            servers[name]["host"] = host
+                        if peer_port:
+                            servers[name]["peer_port"] = peer_port
+
+                    response = {
+                        "status": "ok",
+                        "rank": servers[name]["rank"],
+                        "reference_time": time.time(),
+                    }
+
             elif msg_type == "list":
                 response = {
                     "status": "ok",
                     "servers": [
-                        {"name": name, "rank": info["rank"], "host": info.get("host", ""), "peer_port": info.get("peer_port", 0)}
-                        for name, info in sorted(servers.items(), key=lambda item: item[1]["rank"])
+                        {
+                            "name": name,
+                            "rank": info["rank"],
+                            "host": info.get("host", ""),
+                            "peer_port": info.get("peer_port", 0),
+                        }
+                        for name, info in sorted(
+                            servers.items(),
+                            key=lambda item: item[1]["rank"]
+                        )
                     ],
+                    "reference_time": time.time(),
                 }
+
             elif msg_type == "heartbeat":
                 name = str(msg.get("name", "")).strip()
+                host = str(msg.get("host", "")).strip()
+                peer_port = int(msg.get("peer_port", 0) or 0)
+
                 if not name:
-                    response = {"status": "error", "message": "name obrigatório"}
+                    response = {
+                        "status": "error",
+                        "message": "name obrigatório"
+                    }
                 else:
                     if name not in servers:
                         rank = int(msg.get("rank", next_rank))
-                        servers[name] = {"rank": rank, "last_seen": time.time()}
+                        servers[name] = {
+                            "rank": rank,
+                            "last_seen": time.time(),
+                            "host": host,
+                            "peer_port": peer_port,
+                        }
                         next_rank = max(next_rank, rank + 1)
                     else:
                         servers[name]["last_seen"] = time.time()
-                    host = str(msg.get("host", "")).strip()
-                    peer_port = int(msg.get("peer_port", 0) or 0)
-                    if host:
-                        servers[name]["host"] = host
-                    if peer_port:
-                        servers[name]["peer_port"] = peer_port
-                    response = {"status": "ok", "rank": servers[name]["rank"]}
+                        if host:
+                            servers[name]["host"] = host
+                        if peer_port:
+                            servers[name]["peer_port"] = peer_port
+
+                    response = {
+                        "status": "ok",
+                        "rank": servers[name]["rank"],
+                        "reference_time": time.time(),
+                    }
+
             else:
-                response = {"status": "error", "message": f"operação desconhecida: {msg_type}"}
+                response = {
+                    "status": "error",
+                    "message": f"operação desconhecida: {msg_type}"
+                }
 
             socket.send(msgpack.packb(response, use_bin_type=True))
+
         except Exception as exc:
             socket.send(
                 msgpack.packb(
-                    {"status": "error", "message": str(exc)},
+                    {
+                        "status": "error",
+                        "message": str(exc)
+                    },
                     use_bin_type=True,
                 )
             )
